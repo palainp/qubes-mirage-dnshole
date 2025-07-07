@@ -241,7 +241,7 @@ module Main (KV : Mirage_kv.RO) = struct
                 (* Create a TCP reply with answer as payload *)
                 let dns_cs = Cstruct.of_string answer in
                 let ip_hdr = {hdr with src=hdr.Ipv4_packet.dst ; dst=hdr.Ipv4_packet.src} in
-                let ip_cs = Ipv4_packet.Marshal.make_cstruct ~payload_len:(20+(Cstruct.length dns_cs)) ip_hdr in
+                let ip_cs = Ipv4_packet.Marshal.make_cstruct ~payload_len:(Tcp.Tcp_wire.sizeof_tcp+(Cstruct.length dns_cs)) ip_hdr in
                 let tcp_hdr:Tcp.Tcp_packet.t = {tcp with src_port = tcp.Tcp.Tcp_packet.dst_port; dst_port = tcp.Tcp.Tcp_packet.src_port; } in
                 let tcp_cs = Tcp.Tcp_packet.Marshal.make_cstruct ~pseudoheader:ip_cs ~payload:dns_cs tcp_hdr in
                 let cs = Cstruct.concat [ip_cs; tcp_cs; dns_cs] in
@@ -269,7 +269,7 @@ module Main (KV : Mirage_kv.RO) = struct
                 (* Create a UDP reply with answer as payload *)
                 let dns_cs = Cstruct.of_string answer in
                 let ip_hdr = {hdr with src=hdr.Ipv4_packet.dst ; dst=hdr.Ipv4_packet.src} in
-                let ip_cs = Ipv4_packet.Marshal.make_cstruct ~payload_len:(20+(Cstruct.length dns_cs)) ip_hdr in
+                let ip_cs = Ipv4_packet.Marshal.make_cstruct ~payload_len:(Udp_wire.sizeof_udp+(Cstruct.length dns_cs)) ip_hdr in
                 let udp_hdr:Udp_packet.t = {src_port = udp.Udp_packet.dst_port; dst_port = udp.Udp_packet.src_port; } in
                 let udp_cs = Udp_packet.Marshal.make_cstruct ~pseudoheader:ip_cs ~payload:dns_cs udp_hdr in
                 let cs = Cstruct.concat [ip_cs; udp_cs; dns_cs] in
