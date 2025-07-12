@@ -165,6 +165,29 @@ module Main (KV : Mirage_kv.RO) = struct
               (Printexc.to_string ex));
         Lwt.return_unit)
 
+  let add_to_nat t packet =
+    match
+      Mirage_nat_lru.add t.table packet t.uplink.ip
+        (fun () -> Some (Randomconv.int16 Mirage_crypto_rng.generate))
+        `NAT
+    with
+    | Error err ->
+        Logs.debug (fun m ->
+            m "Failed to add a NAT rule: %a" Mirage_nat.pp_error err);
+        Lwt.return_unit
+    | Ok () -> (
+        match Mirage_nat_lru.translate t.table packet with
+        | Ok packet ->
+            let* () = to_upstream t packet blit_nat in
+            Lwt.return_unit
+        | Error `Untranslated ->
+            Logs.warn (fun m -> m "Can't translate packet, giving up");
+            Lwt.return_unit
+        | Error `TTL_exceeded ->
+            (* TODO(dinosaure): should report ICMP error message to src. *)
+            Logs.warn (fun m -> m "TTL exceeded");
+            Lwt.return_unit)
+
   (* clients packets from ([t.ic]) to upstream *)
   let rec handle_private t primary_t =
     let _ = Qubes.Misc.check_memory () in
@@ -178,173 +201,167 @@ module Main (KV : Mirage_kv.RO) = struct
     | Error `TTL_exceeded ->
         Logs.warn (fun m -> m "TTL exceeded");
         handle_private t primary_t
-    | Error `Untranslated -> (
+    | Error `Untranslated ->
         (* A new flow packet *)
         let (`IPv4 (hdr, payload)) = packet in
         let dns0, dns1 = t.dns in
-        let nat_and_forward packet =
-          match
-            Mirage_nat_lru.add t.table packet t.uplink.ip
-              (fun () -> Some (Randomconv.int16 Mirage_crypto_rng.generate))
-              `NAT
-          with
-          | Error err ->
-              Logs.debug (fun m ->
-                  m "Failed to add a NAT rule: %a" Mirage_nat.pp_error err);
-              handle_private t primary_t
-          | Ok () -> (
-              match Mirage_nat_lru.translate t.table packet with
-              | Ok packet ->
-                  let* () = to_upstream t packet blit_nat in
-                  handle_private t primary_t
-              | Error `Untranslated ->
-                  Logs.warn (fun m -> m "Can't translate packet, giving up");
-                  handle_private t primary_t
-              | Error `TTL_exceeded ->
-                  Logs.warn (fun m -> m "TTL exceeded");
-                  (* TODO(dinosaure): should report ICMP error message to src. *)
-                  handle_private t primary_t)
-        in
         let now = Mirage_ptime.now () in
         let ts = Mirage_mtime.elapsed_ns () in
         let src =
           Ipaddr.of_octets_exn (Ipaddr.V4.to_octets hdr.Ipv4_packet.src)
         in
         (* Let's check if we have a DNS packet, otherwise forward it upstream *)
-        match (hdr.Ipv4_packet.dst, payload) with
-        | ip, `TCP (tcp, payload) when compare dns0 ip || compare dns1 ip -> (
-            (* TCP packet that target a Qubes DNS address *)
-            match Dns.Packet.decode (Cstruct.to_string payload) with
-            | Error _ ->
-                (* Unable to decode the packet, drop ? *)
-                handle_private t primary_t
-            | Ok dns_packet -> (
-                match
-                  (dns_packet.Dns.Packet.data, dns_packet.Dns.Packet.question)
-                with
-                | `Query, (name, `Any) | `Query, (name, `K _) -> (
-                    match
-                      Dns_trie.entries name (Dns_server.Primary.data primary_t)
-                    with
-                    | Error _ ->
-                        (* The domain is not found in the blocking list, forward upstream *)
-                        nat_and_forward packet
-                    | Ok _ -> (
-                        (* The domain is found in the blocking list, reply to the client *)
-                        let primary_t, answer, _notifies, _notify =
-                          Dns_server.Primary.handle_packet primary_t now ts `Tcp
-                            src tcp.Tcp.Tcp_packet.src_port dns_packet None
-                        in
-                        match answer with
-                        | None -> assert false
-                        | Some answer ->
-                            let buf, _max_size =
-                              Dns.Packet.encode `Tcp answer
-                            in
-                            let dns_cs = Cstruct.of_string buf in
-                            let ip_hdr =
-                              {
-                                hdr with
-                                src = hdr.Ipv4_packet.dst;
-                                dst = hdr.Ipv4_packet.src;
-                              }
-                            in
-                            let ip_cs =
-                              Ipv4_packet.Marshal.make_cstruct
-                                ~payload_len:
-                                  (Tcp.Tcp_wire.sizeof_tcp
-                                 + Cstruct.length dns_cs)
-                                ip_hdr
-                            in
-                            let tcp_hdr : Tcp.Tcp_packet.t =
-                              {
-                                tcp with
-                                src_port = tcp.Tcp.Tcp_packet.dst_port;
-                                dst_port = tcp.Tcp.Tcp_packet.src_port;
-                              }
-                            in
-                            let tcp_cs =
-                              Tcp.Tcp_packet.Marshal.make_cstruct
-                                ~pseudoheader:ip_cs ~payload:dns_cs tcp_hdr
-                            in
-                            let cs = Cstruct.concat [ ip_cs; tcp_cs; dns_cs ] in
-                            let* () =
-                              to_client vif cs (fun packet b ->
-                                  let len = Cstruct.length packet in
-                                  Cstruct.blit packet 0 b 0 len;
-                                  len)
-                            in
-                            handle_private t primary_t))
-                | _ ->
-                    (* All other DNS packets, forward ? *)
-                    nat_and_forward packet))
-        | ip, `UDP (udp, payload) when compare dns0 ip || compare dns1 ip -> (
-            (* UDP packet that target a Qubes DNS address *)
-            match Dns.Packet.decode (Cstruct.to_string payload) with
-            | Error _ ->
-                (* Unable to decode the packet, drop ? *)
-                handle_private t primary_t
-            | Ok dns_packet -> (
-                match
-                  (dns_packet.Dns.Packet.data, dns_packet.Dns.Packet.question)
-                with
-                | `Query, (name, `Any) | `Query, (name, `K _) -> (
-                    match
-                      Dns_trie.entries name (Dns_server.Primary.data primary_t)
-                    with
-                    | Error _ ->
-                        (* The domain is not found in the blocking list, forward upstream *)
-                        nat_and_forward packet
-                    | Ok _ -> (
-                        (* The domain is found in the blocking list, reply to the client *)
-                        let primary_t, answer, _notifies, _notify =
-                          Dns_server.Primary.handle_packet primary_t now ts `Udp
-                            src udp.Udp_packet.src_port dns_packet None
-                        in
-                        match answer with
-                        | None -> assert false
-                        | Some answer ->
-                            let buf, _max_size =
-                              Dns.Packet.encode `Udp answer
-                            in
-                            let dns_cs = Cstruct.of_string buf in
-                            let ip_hdr =
-                              {
-                                hdr with
-                                src = hdr.Ipv4_packet.dst;
-                                dst = hdr.Ipv4_packet.src;
-                              }
-                            in
-                            let ip_cs =
-                              Ipv4_packet.Marshal.make_cstruct
-                                ~payload_len:
-                                  (Udp_wire.sizeof_udp + Cstruct.length dns_cs)
-                                ip_hdr
-                            in
-                            let udp_hdr : Udp_packet.t =
-                              {
-                                src_port = udp.Udp_packet.dst_port;
-                                dst_port = udp.Udp_packet.src_port;
-                              }
-                            in
-                            let udp_cs =
-                              Udp_packet.Marshal.make_cstruct
-                                ~pseudoheader:ip_cs ~payload:dns_cs udp_hdr
-                            in
-                            let cs = Cstruct.concat [ ip_cs; udp_cs; dns_cs ] in
-                            let* () =
-                              to_client vif cs (fun packet b ->
-                                  let len = Cstruct.length packet in
-                                  Cstruct.blit packet 0 b 0 len;
-                                  len)
-                            in
-                            handle_private t primary_t))
-                | _ ->
-                    (* All other DNS packets, forward ? *)
-                    nat_and_forward packet))
-        | _, _ ->
-            (* In all other cases, forward to uplink *)
-            nat_and_forward packet)
+        if compare dns0 hdr.Ipv4_packet.dst || compare dns1 hdr.Ipv4_packet.dst
+        then
+          match payload with
+          | `TCP (tcp, payload) -> (
+              (* TCP packet that target a Qubes DNS address *)
+              match Dns.Packet.decode (Cstruct.to_string payload) with
+              | Error _ ->
+                  (* Unable to decode the packet, drop ? *)
+                  handle_private t primary_t
+              | Ok dns_packet -> (
+                  match
+                    (dns_packet.Dns.Packet.data, dns_packet.Dns.Packet.question)
+                  with
+                  | `Query, (name, `Any) | `Query, (name, `K _) -> (
+                      match
+                        Dns_trie.entries name
+                          (Dns_server.Primary.data primary_t)
+                      with
+                      | Error _ ->
+                          (* The domain is not found in the blocking list, forward upstream *)
+                          let* () = add_to_nat t packet in
+                          handle_private t primary_t
+                      | Ok _ -> (
+                          (* The domain is found in the blocking list, reply to the client *)
+                          let primary_t, answer, _notifies, _notify =
+                            Dns_server.Primary.handle_packet primary_t now ts
+                              `Tcp src tcp.Tcp.Tcp_packet.src_port dns_packet
+                              None
+                          in
+                          match answer with
+                          | None -> assert false
+                          | Some answer ->
+                              let buf, _max_size =
+                                Dns.Packet.encode `Tcp answer
+                              in
+                              let dns_cs = Cstruct.of_string buf in
+                              let ip_hdr =
+                                {
+                                  hdr with
+                                  src = hdr.Ipv4_packet.dst;
+                                  dst = hdr.Ipv4_packet.src;
+                                }
+                              in
+                              let ip_cs =
+                                Ipv4_packet.Marshal.make_cstruct
+                                  ~payload_len:
+                                    (Tcp.Tcp_wire.sizeof_tcp
+                                   + Cstruct.length dns_cs)
+                                  ip_hdr
+                              in
+                              let tcp_hdr : Tcp.Tcp_packet.t =
+                                {
+                                  tcp with
+                                  src_port = tcp.Tcp.Tcp_packet.dst_port;
+                                  dst_port = tcp.Tcp.Tcp_packet.src_port;
+                                }
+                              in
+                              let tcp_cs =
+                                Tcp.Tcp_packet.Marshal.make_cstruct
+                                  ~pseudoheader:ip_cs ~payload:dns_cs tcp_hdr
+                              in
+                              let cs =
+                                Cstruct.concat [ ip_cs; tcp_cs; dns_cs ]
+                              in
+                              let* () =
+                                to_client vif cs (fun packet b ->
+                                    let len = Cstruct.length packet in
+                                    Cstruct.blit packet 0 b 0 len;
+                                    len)
+                              in
+                              handle_private t primary_t))
+                  | _ ->
+                      (* All other DNS packets, forward ? *)
+                      let* () = add_to_nat t packet in
+                      handle_private t primary_t))
+          | `UDP (udp, payload) -> (
+              (* UDP packet that target a Qubes DNS address *)
+              match Dns.Packet.decode (Cstruct.to_string payload) with
+              | Error _ ->
+                  (* Unable to decode the packet, drop ? *)
+                  handle_private t primary_t
+              | Ok dns_packet -> (
+                  match
+                    (dns_packet.Dns.Packet.data, dns_packet.Dns.Packet.question)
+                  with
+                  | `Query, (name, `Any) | `Query, (name, `K _) -> (
+                      match
+                        Dns_trie.entries name
+                          (Dns_server.Primary.data primary_t)
+                      with
+                      | Error _ ->
+                          (* The domain is not found in the blocking list, forward upstream *)
+                          let* () = add_to_nat t packet in
+                          handle_private t primary_t
+                      | Ok _ -> (
+                          (* The domain is found in the blocking list, reply to the client *)
+                          let primary_t, answer, _notifies, _notify =
+                            Dns_server.Primary.handle_packet primary_t now ts
+                              `Udp src udp.Udp_packet.src_port dns_packet None
+                          in
+                          match answer with
+                          | None -> assert false
+                          | Some answer ->
+                              let buf, _max_size =
+                                Dns.Packet.encode `Udp answer
+                              in
+                              let dns_cs = Cstruct.of_string buf in
+                              let ip_hdr =
+                                {
+                                  hdr with
+                                  src = hdr.Ipv4_packet.dst;
+                                  dst = hdr.Ipv4_packet.src;
+                                }
+                              in
+                              let ip_cs =
+                                Ipv4_packet.Marshal.make_cstruct
+                                  ~payload_len:
+                                    (Udp_wire.sizeof_udp + Cstruct.length dns_cs)
+                                  ip_hdr
+                              in
+                              let udp_hdr : Udp_packet.t =
+                                {
+                                  src_port = udp.Udp_packet.dst_port;
+                                  dst_port = udp.Udp_packet.src_port;
+                                }
+                              in
+                              let udp_cs =
+                                Udp_packet.Marshal.make_cstruct
+                                  ~pseudoheader:ip_cs ~payload:dns_cs udp_hdr
+                              in
+                              let cs =
+                                Cstruct.concat [ ip_cs; udp_cs; dns_cs ]
+                              in
+                              let* () =
+                                to_client vif cs (fun packet b ->
+                                    let len = Cstruct.length packet in
+                                    Cstruct.blit packet 0 b 0 len;
+                                    len)
+                              in
+                              handle_private t primary_t))
+                  | _ ->
+                      (* All other DNS packets, forward ? *)
+                      let* () = add_to_nat t packet in
+                      handle_private t primary_t))
+          | `ICMP _ ->
+              (* Other protocols are not DNS request, drop *)
+              handle_private t primary_t
+        else
+          (* In all other cases, forward to uplink *)
+          let* () = add_to_nat t packet in
+          handle_private t primary_t
 
   (* uplink packets from ([t.oc]) to the destination client *)
   let rec handle_uplink t =
