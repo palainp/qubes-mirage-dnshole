@@ -490,7 +490,9 @@ module Main (KV : Mirage_kv.RO) = struct
             fn ()
         | None -> Lwt.return_unit
       in
-      fn ()
+      Lwt.catch fn @@ function
+      | Lwt.Canceled -> Lwt.return_unit
+      | exn -> Lwt.fail exn
     in
     Finaliser.add ~finaliser:(fun () -> Lwt.cancel transmit) finalisers;
     Lwt.async (fun () -> Lwt.pick [ listener; transmit ]);
