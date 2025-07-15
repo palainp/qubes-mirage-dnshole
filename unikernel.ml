@@ -22,6 +22,7 @@ let blocklist_name =
 
 module Main (KV : Mirage_kv.RO) = struct
   type uplink = {
+    mutable fragments : Fragments.Cache.t;
     net : Netif.t;
     eth : UplinkEth.t;
     arp : Arp.t;
@@ -30,11 +31,6 @@ module Main (KV : Mirage_kv.RO) = struct
 
   type t = {
     table : Mirage_nat_lru.t;
-    mutable oc_fragments : Fragments.Cache.t;
-    oc : Nat_packet.t Lwt_stream.t * (Nat_packet.t option -> unit);
-    ic :
-      (Vif.t * Nat_packet.t) Lwt_stream.t
-      * ((Vif.t * Nat_packet.t) option -> unit);
     uplink : uplink;
         (* dns0 and dns1 from qubesDB, and the resolver address from command line *)
     dns : Ipaddr.V4.t * Ipaddr.V4.t;
@@ -165,7 +161,19 @@ module Main (KV : Mirage_kv.RO) = struct
               (Printexc.to_string ex));
         Lwt.return_unit)
 
-  let add_to_nat t packet =
+  (* Translate the packet according to the NAT table *)
+  let translate t packet =
+    match Mirage_nat_lru.translate t.table packet with
+    | Ok packet -> Some packet
+    | Error `Untranslated ->
+        Logs.warn (fun m -> m "Can't translate packet, giving up");
+        None
+    | Error `TTL_exceeded ->
+        (* TODO(dinosaure): should report ICMP error message to src. *)
+        Logs.warn (fun m -> m "TTL exceeded");
+        None
+
+  let nat_and_forward t packet =
     match
       Mirage_nat_lru.add t.table packet t.uplink.ip
         (fun () -> Some (Randomconv.int16 Mirage_crypto_rng.generate))
@@ -176,37 +184,24 @@ module Main (KV : Mirage_kv.RO) = struct
             m "Failed to add a NAT rule: %a" Mirage_nat.pp_error err);
         Lwt.return_unit
     | Ok () -> (
-        match Mirage_nat_lru.translate t.table packet with
-        | Ok packet ->
-            let* () = to_upstream t packet blit_nat in
-            Lwt.return_unit
-        | Error `Untranslated ->
-            Logs.warn (fun m -> m "Can't translate packet, giving up");
-            Lwt.return_unit
-        | Error `TTL_exceeded ->
-            (* TODO(dinosaure): should report ICMP error message to src. *)
-            Logs.warn (fun m -> m "TTL exceeded");
-            Lwt.return_unit)
+        (* In all other cases, forward to uplink *)
+        match translate t packet with
+        | Some packet -> to_upstream t packet blit_nat
+        | None -> Lwt.return_unit)
 
-  (* clients packets from ([t.ic]) to upstream *)
-  let rec handle_private t primary_t =
+  (* clients packets to upstream *)
+  let handle_private t primary_t vif packet =
     let _ = Qubes.Misc.check_memory () in
     (* TODO: do something when Memory_critical is returned *)
-    let* packet = Lwt_stream.get (fst t.ic) in
-    let vif, packet = Option.get packet in
     match Mirage_nat_lru.translate t.table packet with
-    | Ok packet ->
-        let* () = to_upstream t packet blit_nat in
-        handle_private t primary_t
+    | Ok packet -> to_upstream t packet blit_nat
     | Error `TTL_exceeded ->
         Logs.warn (fun m -> m "TTL exceeded");
-        handle_private t primary_t
+        Lwt.return_unit
     | Error `Untranslated ->
         (* A new flow packet *)
         let (`IPv4 (hdr, payload)) = packet in
         let dns0, dns1 = t.dns in
-        let now = Mirage_ptime.now () in
-        let ts = Mirage_mtime.elapsed_ns () in
         let src =
           Ipaddr.of_octets_exn (Ipaddr.V4.to_octets hdr.Ipv4_packet.src)
         in
@@ -219,7 +214,7 @@ module Main (KV : Mirage_kv.RO) = struct
               match Dns.Packet.decode (Cstruct.to_string payload) with
               | Error _ ->
                   (* Unable to decode the packet, drop ? *)
-                  handle_private t primary_t
+                  Lwt.return_unit
               | Ok dns_packet -> (
                   match
                     (dns_packet.Dns.Packet.data, dns_packet.Dns.Packet.question)
@@ -231,12 +226,13 @@ module Main (KV : Mirage_kv.RO) = struct
                       with
                       | Error _ ->
                           (* The domain is not found in the blocking list, forward upstream *)
-                          let* () = add_to_nat t packet in
-                          handle_private t primary_t
+                          nat_and_forward t packet
                       | Ok _ -> (
                           (* The domain is found in the blocking list, reply to the client *)
-                          let primary_t, answer, _notifies, _notify =
-                            Dns_server.Primary.handle_packet primary_t now ts
+                          let _primary_t, answer, _notifies, _notify =
+                            Dns_server.Primary.handle_packet primary_t
+                              (Mirage_ptime.now ())
+                              (Mirage_mtime.elapsed_ns ())
                               `Tcp src tcp.Tcp.Tcp_packet.src_port dns_packet
                               None
                           in
@@ -275,23 +271,19 @@ module Main (KV : Mirage_kv.RO) = struct
                               let cs =
                                 Cstruct.concat [ ip_cs; tcp_cs; dns_cs ]
                               in
-                              let* () =
-                                to_client vif cs (fun packet b ->
-                                    let len = Cstruct.length packet in
-                                    Cstruct.blit packet 0 b 0 len;
-                                    len)
-                              in
-                              handle_private t primary_t))
+                              to_client vif cs (fun packet b ->
+                                  let len = Cstruct.length packet in
+                                  Cstruct.blit packet 0 b 0 len;
+                                  len)))
                   | _ ->
                       (* All other DNS packets, forward ? *)
-                      let* () = add_to_nat t packet in
-                      handle_private t primary_t))
+                      nat_and_forward t packet))
           | `UDP (udp, payload) -> (
               (* UDP packet that target a Qubes DNS address *)
               match Dns.Packet.decode (Cstruct.to_string payload) with
               | Error _ ->
                   (* Unable to decode the packet, drop ? *)
-                  handle_private t primary_t
+                  Lwt.return_unit
               | Ok dns_packet -> (
                   match
                     (dns_packet.Dns.Packet.data, dns_packet.Dns.Packet.question)
@@ -303,12 +295,13 @@ module Main (KV : Mirage_kv.RO) = struct
                       with
                       | Error _ ->
                           (* The domain is not found in the blocking list, forward upstream *)
-                          let* () = add_to_nat t packet in
-                          handle_private t primary_t
+                          nat_and_forward t packet
                       | Ok _ -> (
                           (* The domain is found in the blocking list, reply to the client *)
-                          let primary_t, answer, _notifies, _notify =
-                            Dns_server.Primary.handle_packet primary_t now ts
+                          let _primary_t, answer, _notifies, _notify =
+                            Dns_server.Primary.handle_packet primary_t
+                              (Mirage_ptime.now ())
+                              (Mirage_mtime.elapsed_ns ())
                               `Udp src udp.Udp_packet.src_port dns_packet None
                           in
                           match answer with
@@ -344,42 +337,35 @@ module Main (KV : Mirage_kv.RO) = struct
                               let cs =
                                 Cstruct.concat [ ip_cs; udp_cs; dns_cs ]
                               in
-                              let* () =
-                                to_client vif cs (fun packet b ->
-                                    let len = Cstruct.length packet in
-                                    Cstruct.blit packet 0 b 0 len;
-                                    len)
-                              in
-                              handle_private t primary_t))
+                              to_client vif cs (fun packet b ->
+                                  let len = Cstruct.length packet in
+                                  Cstruct.blit packet 0 b 0 len;
+                                  len)))
                   | _ ->
                       (* All other DNS packets, forward ? *)
-                      let* () = add_to_nat t packet in
-                      handle_private t primary_t))
+                      nat_and_forward t packet))
           | `ICMP _ ->
               (* Other protocols are not DNS request, drop *)
-              handle_private t primary_t
-        else
-          (* In all other cases, forward to uplink *)
-          let* () = add_to_nat t packet in
-          handle_private t primary_t
+              Lwt.return_unit
+        else nat_and_forward t packet
 
-  (* uplink packets from ([t.oc]) to the destination client *)
-  let rec handle_uplink t =
-    let* packet = Lwt_stream.get (fst t.oc) in
-    let packet = Option.get packet in
-    let (`IPv4 (hdr, _payload)) = packet in
-    let dest = hdr.Ipv4_packet.dst in
-    let* () =
-      match Clients.lookup t.clients dest with
-      | Some vif ->
-          Logs.debug (fun m -> m "Sending a packet to %a" Ipaddr.V4.pp dest);
-          to_client vif packet blit_nat
-      | None ->
-          Logs.warn (fun m ->
-              m "%a does not exist as a client" Ipaddr.V4.pp dest);
-          Lwt.return_unit
-    in
-    handle_uplink t
+  (* uplink packets uplink to the destination client *)
+  let handle_uplink t packet =
+    match translate t packet with
+    | Some frame -> (
+        let (`IPv4 (hdr, _payload)) = frame in
+        let dest = hdr.Ipv4_packet.dst in
+        match Clients.lookup t.clients dest with
+        | Some vif ->
+            Logs.debug (fun m -> m "Sending a packet to %a" Ipaddr.V4.pp dest);
+            to_client vif frame blit_nat
+        | None ->
+            Logs.warn (fun m ->
+                m "%a does not exist as a client" Ipaddr.V4.pp dest);
+            Lwt.return_unit)
+    | None ->
+        Logs.debug (fun m -> m "Not translated");
+        Lwt.return_unit
 
   (* wait for uplink packets and put them into [t.oc] *)
   let uplink_loop t =
@@ -390,9 +376,9 @@ module Main (KV : Mirage_kv.RO) = struct
         UplinkEth.input t.uplink.eth ~arpv4:(Arp.input t.uplink.arp)
           ~ipv4:(fun ip ->
             let fragments, r =
-              Nat_packet.of_ipv4_packet t.oc_fragments ~now ip
+              Nat_packet.of_ipv4_packet t.uplink.fragments ~now ip
             in
-            t.oc_fragments <- fragments;
+            t.uplink.fragments <- fragments;
             match r with
             | Error e ->
                 Log.warn (fun f ->
@@ -400,70 +386,53 @@ module Main (KV : Mirage_kv.RO) = struct
                       Nat_packet.pp_error e);
                 Lwt.return_unit
             | Ok None -> Lwt.return_unit
-            | Ok (Some (`IPv4 (hdr, payload))) ->
-                let packet = Some (`IPv4 (hdr, payload)) in
-                let packet =
-                  Option.map (Mirage_nat_lru.translate t.table) packet
-                in
-                let packet = Option.map Result.to_option packet in
-                Lwt.return
-                  (Option.iter (snd t.oc % Option.some) (Option.join packet)))
+            | Ok (Some packet) -> handle_uplink t packet)
           ~ipv6:(fun _ip -> Lwt.return_unit)
           frame)
     >|= or_raise "Uplink listen loop" Netif.pp_error
 
   (* Create a vif dedicated for a new client *)
-  let add_vif ~finalisers t ({ Dao.Client_vif.domid; device_id } as client_vif)
-      ipaddr () =
+  let add_vif t primary_t ~finalisers
+      ({ Dao.Client_vif.domid; device_id } as client_vif) ipaddr () =
     let open Lwt.Infix in
     let* backend = Vif.Netbackend.make ~domid ~device_id in
-    let ic_fragments = ref (Fragments.Cache.empty (256 * 1024)) in
-    let ic = Lwt_stream.create () in
     let gateway = Clients.default_gateway t.clients in
     let* vif = Vif.make backend client_vif ~gateway ipaddr in
     let* () = Clients.add_client t.clients vif in
-    let should_be_routed hdr =
-      compare ipaddr hdr.Ipv4_packet.src
-      && not (compare ipaddr hdr.Ipv4_packet.dst)
-    in
     Finaliser.add
       ~finaliser:(fun () -> Clients.rem_client t.clients vif)
       finalisers;
+    let fragment_cache = ref (Fragments.Cache.empty (256 * 1024)) in
+
     let listener =
       let fn () =
         let arpv4 = Vif.Client_arp.input vif.Vif.arp in
-        let ipv4 payload =
-          match Ipv4_packet.Unmarshal.of_cstruct payload with
-          | Error msg ->
-              Logs.err (fun m ->
-                  m "Couldn't decode IPv4 packet %s: %a" msg Cstruct.hexdump_pp
-                    payload)
-          | Ok (hdr, payload) when should_be_routed hdr ->
-              let now = Mirage_mtime.elapsed_ns () in
-              let fragments, packet =
-                Fragments.process !ic_fragments now hdr payload
-              in
-              let packet =
-                Option.bind packet (fun (hdr, payload) -> of_ipv4 hdr payload)
-              in
-              ic_fragments := fragments;
-              Fun.flip Option.iter packet (snd ic % Option.some)
-          | Ok (hdr, _) ->
-              Logs.warn (fun m ->
-                  m
-                    "Ignoring IPv4 packet which should not be routed (IP \
-                     header: %a)"
-                    Ipv4_packet.pp hdr)
-        in
-        let ipv4 payload =
-          ipv4 payload;
-          Lwt.return_unit
+        let ipv4 vif packet =
+          let cache', r =
+            Nat_packet.of_ipv4_packet !fragment_cache
+              ~now:(Mirage_mtime.elapsed_ns ())
+              packet
+          in
+          fragment_cache := cache';
+          match r with
+          | Error e ->
+              Log.warn (fun f ->
+                  f "Ignored unknown IPv4 message: %a" Nat_packet.pp_error e);
+              Lwt.return_unit
+          | Ok None -> Lwt.return_unit
+          | Ok (Some packet) -> handle_private t primary_t vif packet
         in
         let header_size = Ethernet.Packet.sizeof_ethernet
-        and input =
-          Vif.Client_ethernet.input ~arpv4 ~ipv4
-            ~ipv6:(fun _ -> Lwt.return_unit)
-            vif.Vif.ethernet
+        and input frame =
+          match Ethernet.Packet.of_cstruct frame with
+          | Error err ->
+              Log.warn (fun f -> f "Invalid Ethernet frame: %s" err);
+              Lwt.return_unit
+          | Ok (eth, payload) -> (
+              match eth.Ethernet.Packet.ethertype with
+              | `ARP -> arpv4 payload
+              | `IPv4 -> ipv4 vif payload
+              | `IPv6 -> Lwt.return_unit)
         in
         Logs.debug (fun m -> m "%a starts to listen packets" Vif.pp vif);
         Vif.Netbackend.listen backend ~header_size input >>= function
@@ -482,26 +451,13 @@ module Main (KV : Mirage_kv.RO) = struct
       | exn -> Lwt.fail exn
     in
     Finaliser.add ~finaliser:(fun () -> Lwt.cancel listener) finalisers;
-    let transmit =
-      let rec fn () =
-        Lwt_stream.get (fst ic) >>= function
-        | Some packet ->
-            (snd t.ic) (Some (vif, packet));
-            fn ()
-        | None -> Lwt.return_unit
-      in
-      Lwt.catch fn @@ function
-      | Lwt.Canceled -> Lwt.return_unit
-      | exn -> Lwt.fail exn
-    in
-    Finaliser.add ~finaliser:(fun () -> Lwt.cancel transmit) finalisers;
-    Lwt.async (fun () -> Lwt.pick [ listener; transmit ]);
+    Lwt.async (fun () -> listener);
     Lwt.return finalisers
 
   (* Handles the connexion with a new client *)
-  let add_client t client_vif ipaddr =
+  let add_client t primary_t client_vif ipaddr =
     let finalisers = Finaliser.create () in
-    Lwt.catch (add_vif t ~finalisers client_vif ipaddr) @@ function
+    Lwt.catch (add_vif t primary_t ~finalisers client_vif ipaddr) @@ function
     | exn ->
         Logs.warn (fun f ->
             f "Error with client %a: %s" Dao.Client_vif.pp client_vif
@@ -509,7 +465,7 @@ module Main (KV : Mirage_kv.RO) = struct
         Lwt.return finalisers
 
   (* Waits for new clients *)
-  let wait_clients t =
+  let wait_clients t primary_t =
     let clients : Finaliser.t Dao.Vif_map.t ref = ref Dao.Vif_map.empty in
     Dao.watch_clients @@ fun m ->
     Logs.debug (fun m -> m "The network topology was updated");
@@ -523,7 +479,7 @@ module Main (KV : Mirage_kv.RO) = struct
       match Seq.uncons seq with
       | Some ((client_vif, ipaddr), seq)
         when not (Dao.Vif_map.mem client_vif !clients) ->
-          let* finalisers = add_client t client_vif ipaddr in
+          let* finalisers = add_client t primary_t client_vif ipaddr in
           Logs.debug (fun f ->
               f "client %a arrived" Dao.Client_vif.pp client_vif);
           clients := Dao.Vif_map.add client_vif finalisers !clients;
@@ -590,13 +546,11 @@ module Main (KV : Mirage_kv.RO) = struct
     let clients = Clients.create cfg in
 
     (* Report memory usage to XenStore *)
+    let fragments_cache = Fragments.Cache.empty (256 * 1024) in
     let t =
       {
         table = nat;
-        oc_fragments = Fragments.Cache.empty (256 * 1024);
-        oc = Lwt_stream.create ();
-        ic = Lwt_stream.create ();
-        uplink = { net; eth; arp; ip = cfg.Dao.ip };
+        uplink = { fragments = fragments_cache; net; eth; arp; ip = cfg.Dao.ip };
         dns = (fst cfg.Dao.dns, snd cfg.Dao.dns);
         clients;
       }
@@ -609,9 +563,7 @@ module Main (KV : Mirage_kv.RO) = struct
           agent_listener;
           Qubes.Misc.shutdown;
           uplink_loop t;
-          handle_uplink t;
-          wait_clients t;
-          handle_private t primary_t;
+          wait_clients t primary_t;
         ]
     in
 
