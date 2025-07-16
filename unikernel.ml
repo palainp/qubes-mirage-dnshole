@@ -219,7 +219,7 @@ module Main (KV : Mirage_kv.RO) = struct
   let nat_and_forward t packet =
     match
       Mirage_nat_lru.add t.table packet t.uplink.ip
-        (fun () -> Some (1024 + Random.int (0xffff - 1024)))
+        (fun () -> Some (Randomconv.int16 Mirage_crypto_rng.generate))
         `NAT
     with
     | Error err ->
@@ -234,7 +234,7 @@ module Main (KV : Mirage_kv.RO) = struct
 
   (* clients packets to upstream *)
   let handle_private t primary_t vif packet =
-    (* let _ = Qubes.Misc.check_memory ~fraction:30 () in *)
+    let _ = Qubes.Misc.check_memory ~fraction:20 () in
     (* TODO: do something when Memory_critical is returned *)
     match Mirage_nat_lru.translate t.table packet with
     | Ok packet -> to_upstream t packet
@@ -317,7 +317,7 @@ module Main (KV : Mirage_kv.RO) = struct
 
   (* uplink packets uplink to the destination client *)
   let handle_uplink t packet =
-    let _ = Qubes.Misc.check_memory ~fraction:30 () in
+    let _ = Qubes.Misc.check_memory ~fraction:20 () in
     match translate t packet with
     | Some frame -> (
         let (`IPv4 (hdr, _payload)) = frame in
