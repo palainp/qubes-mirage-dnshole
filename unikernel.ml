@@ -94,34 +94,6 @@ module Main (KV : Mirage_kv.RO) = struct
   (* Helpers *)
   let compare a b = Ipaddr.V4.compare a b = 0
 
-  let fail_to_parse ~protocol ~payload =
-    Result.iter_error @@ fun msg ->
-    Logs.debug (fun m ->
-        m "Failed to parse %s packet: %s@.%a" protocol msg Cstruct.hexdump_pp
-          payload)
-
-  let of_ipv4 hdr payload =
-    match Ipv4_packet.(Unmarshal.int_to_protocol hdr.proto) with
-    | Some `TCP ->
-        let value = Tcp.Tcp_packet.Unmarshal.of_cstruct payload in
-        let fn (tcp, payload) = `IPv4 (hdr, `TCP (tcp, payload)) in
-        fail_to_parse ~protocol:"TCP" ~payload value;
-        Option.map fn (Result.to_option value)
-    | Some `UDP ->
-        let value = Udp_packet.Unmarshal.of_cstruct payload in
-        let fn (udp, payload) = `IPv4 (hdr, `UDP (udp, payload)) in
-        fail_to_parse ~protocol:"UDP" ~payload value;
-        Option.map fn (Result.to_option value)
-    | Some `ICMP ->
-        let value = Icmpv4_packet.Unmarshal.of_cstruct payload in
-        let fn (hdr', payload) = `IPv4 (hdr, `ICMP (hdr', payload)) in
-        fail_to_parse ~protocol:"ICMP" ~payload value;
-        Option.map fn (Result.to_option value)
-    | _ ->
-        Logs.debug (fun m ->
-            m "Ignoring non-TCP/UDP/ICMP packet: %a" Ipv4_packet.pp hdr);
-        None
-
   let command_handler ~user:_ cmd _flow =
     match cmd with
     | "QUBESRPC qubes.WaitForSession none" -> return 0 (* Always ready! *)
@@ -289,7 +261,7 @@ module Main (KV : Mirage_kv.RO) = struct
                       | Error _ ->
                           (* The domain is not found in the blocking list, forward upstream for resolution *)
                           nat_and_forward t packet
-                      | Ok _ ->
+                      | Ok (_soa, _map) ->
                           (* construct a Nat_packet for that client with a DNS answer saying that the name is associated with localhost *)
                           let ip_hdr : Ipv4_packet.t =
                             {
