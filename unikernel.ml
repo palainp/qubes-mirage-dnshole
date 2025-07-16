@@ -94,11 +94,6 @@ module Main (KV : Mirage_kv.RO) = struct
   (* Helpers *)
   let compare a b = Ipaddr.V4.compare a b = 0
 
-  let blit_nat packet buf =
-    match Nat_packet.into_cstruct packet buf with
-    | Ok (size, _) -> size
-    | Error _ -> failwith "unable to copy into the buffer"
-
   let fail_to_parse ~protocol ~payload =
     Result.iter_error @@ fun msg ->
     Logs.debug (fun m ->
@@ -135,29 +130,76 @@ module Main (KV : Mirage_kv.RO) = struct
         return 1
 
   (* Write a Nat_packet to the uplink interface *)
-  let to_upstream t packet fillfn =
+  let to_upstream t packet =
     Lwt.catch
       (fun () ->
         let uplink = t.uplink.eth in
-        UplinkEth.write uplink (UplinkEth.mac uplink) `IPv4 (fillfn packet)
-        >|= or_raise "Write to uplink" UplinkEth.pp_error)
+        let fragments = ref [] in
+        ( UplinkEth.write uplink (UplinkEth.mac uplink) `IPv4 (fun b ->
+              match Nat_packet.into_cstruct packet b with
+              | Error e ->
+                  Log.warn (fun f ->
+                      f "Failed to write packet: %a" Nat_packet.pp_error e);
+                  0
+              | Ok (n, frags) ->
+                  fragments := frags;
+                  n)
+        >|= function
+          | Ok () -> ()
+          | Error _e -> Log.err (fun f -> f "error trying to send to upstream")
+        )
+        >>= fun () ->
+        Lwt_list.iter_s
+          (fun f ->
+            let size = Cstruct.length f in
+            UplinkEth.write uplink (UplinkEth.mac uplink) `IPv4 (fun b ->
+                Cstruct.blit f 0 b 0 size;
+                size)
+            >|= function
+            | Ok () -> ()
+            | Error _e ->
+                Log.err (fun f -> f "error trying to send to upstream"))
+          !fragments)
       (fun ex ->
         Log.err (fun f ->
-            f "uncaught exception trying to send to uplink: @[%s@]"
+            f "uncaught exception trying to send to uplink: %s"
               (Printexc.to_string ex));
         Lwt.return_unit)
 
   (* Write a Nat_packet to the vif interface *)
-  let to_client vif packet fillfn =
+  let to_client vif packet =
     Lwt.catch
       (fun () ->
-        Vif.Client_ethernet.write vif.Vif.ethernet (snd vif.mac) `IPv4
-          (fillfn packet)
-        >|= or_raise "Write to client" Vif.Client_ethernet.pp_error)
+        let fragments = ref [] in
+        ( Vif.Client_ethernet.write vif.Vif.ethernet (snd vif.mac) `IPv4
+            (fun b ->
+              match Nat_packet.into_cstruct packet b with
+              | Error e ->
+                  Log.warn (fun f ->
+                      f "Failed to write packet: %a" Nat_packet.pp_error e);
+                  0
+              | Ok (n, frags) ->
+                  fragments := frags;
+                  n)
+        >|= function
+          | Ok () -> ()
+          | Error _e -> Log.err (fun f -> f "error trying to send to client") )
+        >>= fun () ->
+        Lwt_list.iter_s
+          (fun f ->
+            let size = Cstruct.length f in
+            Vif.Client_ethernet.write vif.Vif.ethernet (snd vif.mac) `IPv4
+              (fun b ->
+                Cstruct.blit f 0 b 0 size;
+                size)
+            >|= function
+            | Ok () -> ()
+            | Error _e -> Log.err (fun f -> f "error trying to send to client"))
+          !fragments)
       (fun ex ->
         (* Usually Netback_shutdown, because the client disconnected *)
         Log.err (fun f ->
-            f "uncaught exception trying to send to client: @[%s@]"
+            f "uncaught exception trying to send to client: %s"
               (Printexc.to_string ex));
         Lwt.return_unit)
 
@@ -166,35 +208,36 @@ module Main (KV : Mirage_kv.RO) = struct
     match Mirage_nat_lru.translate t.table packet with
     | Ok packet -> Some packet
     | Error `Untranslated ->
-        Logs.warn (fun m -> m "Can't translate packet, giving up");
+        Log.debug (fun f -> f "Failed to NAT %a" Nat_packet.pp packet);
         None
     | Error `TTL_exceeded ->
         (* TODO(dinosaure): should report ICMP error message to src. *)
         Logs.warn (fun m -> m "TTL exceeded");
         None
 
+  (* Add the packet to the NAT table, and forward uplink it afterward *)
   let nat_and_forward t packet =
     match
       Mirage_nat_lru.add t.table packet t.uplink.ip
-        (fun () -> Some (Randomconv.int16 Mirage_crypto_rng.generate))
+        (fun () -> Some (1024 + Random.int (0xffff - 1024)))
         `NAT
     with
     | Error err ->
-        Logs.debug (fun m ->
+        Logs.warn (fun m ->
             m "Failed to add a NAT rule: %a" Mirage_nat.pp_error err);
         Lwt.return_unit
     | Ok () -> (
         (* In all other cases, forward to uplink *)
         match translate t packet with
-        | Some packet -> to_upstream t packet blit_nat
+        | Some packet -> to_upstream t packet
         | None -> Lwt.return_unit)
 
   (* clients packets to upstream *)
   let handle_private t primary_t vif packet =
-    let _ = Qubes.Misc.check_memory () in
+    (* let _ = Qubes.Misc.check_memory ~fraction:30 () in *)
     (* TODO: do something when Memory_critical is returned *)
     match Mirage_nat_lru.translate t.table packet with
-    | Ok packet -> to_upstream t packet blit_nat
+    | Ok packet -> to_upstream t packet
     | Error `TTL_exceeded ->
         Logs.warn (fun m -> m "TTL exceeded");
         Lwt.return_unit
@@ -202,18 +245,37 @@ module Main (KV : Mirage_kv.RO) = struct
         (* A new flow packet *)
         let (`IPv4 (hdr, payload)) = packet in
         let dns0, dns1 = t.dns in
-        let src =
-          Ipaddr.of_octets_exn (Ipaddr.V4.to_octets hdr.Ipv4_packet.src)
-        in
         (* Let's check if we have a DNS packet, otherwise forward it upstream *)
         if compare dns0 hdr.Ipv4_packet.dst || compare dns1 hdr.Ipv4_packet.dst
         then
-          match payload with
-          | `TCP (tcp, payload) -> (
-              (* TCP packet that target a Qubes DNS address *)
+          match
+            match payload with
+            | `TCP (tcp, payload) ->
+                let tcp_hdr =
+                  {
+                    tcp with
+                    src_port = tcp.Tcp.Tcp_packet.dst_port;
+                    dst_port = tcp.Tcp.Tcp_packet.src_port;
+                  }
+                in
+                Some (`TCP tcp_hdr, payload)
+            | `UDP (udp, payload) ->
+                let udp_hdr : Udp_packet.t =
+                  {
+                    src_port = udp.Udp_packet.dst_port;
+                    dst_port = udp.Udp_packet.src_port;
+                  }
+                in
+                Some (`UDP udp_hdr, payload)
+            | `ICMP _ -> None
+          with
+          | None ->
+              (* ICMP for Qubes DNS addresses: forward uplink otherwise many fail to NAT logs will appears :) *)
+              nat_and_forward t packet
+          | Some (l4_hdr, payload) -> (
               match Dns.Packet.decode (Cstruct.to_string payload) with
               | Error _ ->
-                  (* Unable to decode the packet, drop ? *)
+                  (* Unable to decode the packet: drop *)
                   Lwt.return_unit
               | Ok dns_packet -> (
                   match
@@ -225,132 +287,37 @@ module Main (KV : Mirage_kv.RO) = struct
                           (Dns_server.Primary.data primary_t)
                       with
                       | Error _ ->
-                          (* The domain is not found in the blocking list, forward upstream *)
+                          (* The domain is not found in the blocking list, forward upstream for resolution *)
                           nat_and_forward t packet
-                      | Ok _ -> (
-                          (* The domain is found in the blocking list, reply to the client *)
-                          let _primary_t, answer, _notifies, _notify =
-                            Dns_server.Primary.handle_packet primary_t
-                              (Mirage_ptime.now ())
-                              (Mirage_mtime.elapsed_ns ())
-                              `Tcp src tcp.Tcp.Tcp_packet.src_port dns_packet
-                              None
+                      | Ok _ ->
+                          (* construct a Nat_packet for that client with a DNS answer saying that the name is associated with localhost *)
+                          let ip_hdr : Ipv4_packet.t =
+                            {
+                              hdr with
+                              src = hdr.Ipv4_packet.dst;
+                              dst = hdr.Ipv4_packet.src;
+                            }
                           in
-                          match answer with
-                          | None -> assert false
-                          | Some answer ->
-                              let buf, _max_size =
-                                Dns.Packet.encode `Tcp answer
-                              in
-                              let dns_cs = Cstruct.of_string buf in
-                              let ip_hdr =
-                                {
-                                  hdr with
-                                  src = hdr.Ipv4_packet.dst;
-                                  dst = hdr.Ipv4_packet.src;
-                                }
-                              in
-                              let ip_cs =
-                                Ipv4_packet.Marshal.make_cstruct
-                                  ~payload_len:
-                                    (Tcp.Tcp_wire.sizeof_tcp
-                                   + Cstruct.length dns_cs)
-                                  ip_hdr
-                              in
-                              let tcp_hdr : Tcp.Tcp_packet.t =
-                                {
-                                  tcp with
-                                  src_port = tcp.Tcp.Tcp_packet.dst_port;
-                                  dst_port = tcp.Tcp.Tcp_packet.src_port;
-                                }
-                              in
-                              let tcp_cs =
-                                Tcp.Tcp_packet.Marshal.make_cstruct
-                                  ~pseudoheader:ip_cs ~payload:dns_cs tcp_hdr
-                              in
-                              let cs =
-                                Cstruct.concat [ ip_cs; tcp_cs; dns_cs ]
-                              in
-                              to_client vif cs (fun packet b ->
-                                  let len = Cstruct.length packet in
-                                  Cstruct.blit packet 0 b 0 len;
-                                  len)))
-                  | _ ->
-                      (* All other DNS packets, forward ? *)
-                      nat_and_forward t packet))
-          | `UDP (udp, payload) -> (
-              (* UDP packet that target a Qubes DNS address *)
-              match Dns.Packet.decode (Cstruct.to_string payload) with
-              | Error _ ->
-                  (* Unable to decode the packet, drop ? *)
-                  Lwt.return_unit
-              | Ok dns_packet -> (
-                  match
-                    (dns_packet.Dns.Packet.data, dns_packet.Dns.Packet.question)
-                  with
-                  | `Query, (name, `Any) | `Query, (name, `K _) -> (
-                      match
-                        Dns_trie.entries name
-                          (Dns_server.Primary.data primary_t)
-                      with
-                      | Error _ ->
-                          (* The domain is not found in the blocking list, forward upstream *)
-                          nat_and_forward t packet
-                      | Ok _ -> (
-                          (* The domain is found in the blocking list, reply to the client *)
-                          let _primary_t, answer, _notifies, _notify =
-                            Dns_server.Primary.handle_packet primary_t
-                              (Mirage_ptime.now ())
-                              (Mirage_mtime.elapsed_ns ())
-                              `Udp src udp.Udp_packet.src_port dns_packet None
+                          (* TODO: create the correct Cstruct *)
+                          let reply = Cstruct.empty in
+                          let ip_payload =
+                            match l4_hdr with
+                            | `TCP tcp -> `TCP (tcp, reply)
+                            | `UDP udp -> `UDP (udp, reply)
+                            | _ -> assert false (* ICMP should not be here *)
                           in
-                          match answer with
-                          | None -> assert false
-                          | Some answer ->
-                              let buf, _max_size =
-                                Dns.Packet.encode `Udp answer
-                              in
-                              let dns_cs = Cstruct.of_string buf in
-                              let ip_hdr =
-                                {
-                                  hdr with
-                                  src = hdr.Ipv4_packet.dst;
-                                  dst = hdr.Ipv4_packet.src;
-                                }
-                              in
-                              let ip_cs =
-                                Ipv4_packet.Marshal.make_cstruct
-                                  ~payload_len:
-                                    (Udp_wire.sizeof_udp + Cstruct.length dns_cs)
-                                  ip_hdr
-                              in
-                              let udp_hdr : Udp_packet.t =
-                                {
-                                  src_port = udp.Udp_packet.dst_port;
-                                  dst_port = udp.Udp_packet.src_port;
-                                }
-                              in
-                              let udp_cs =
-                                Udp_packet.Marshal.make_cstruct
-                                  ~pseudoheader:ip_cs ~payload:dns_cs udp_hdr
-                              in
-                              let cs =
-                                Cstruct.concat [ ip_cs; udp_cs; dns_cs ]
-                              in
-                              to_client vif cs (fun packet b ->
-                                  let len = Cstruct.length packet in
-                                  Cstruct.blit packet 0 b 0 len;
-                                  len)))
+                          let nat_packet : Nat_packet.t =
+                            `IPv4 (ip_hdr, ip_payload)
+                          in
+                          to_client vif nat_packet)
                   | _ ->
-                      (* All other DNS packets, forward ? *)
-                      nat_and_forward t packet))
-          | `ICMP _ ->
-              (* Other protocols are not DNS request, drop *)
-              Lwt.return_unit
+                      (* Every other DNS packets from client: drop? *)
+                      Lwt.return_unit))
         else nat_and_forward t packet
 
   (* uplink packets uplink to the destination client *)
   let handle_uplink t packet =
+    let _ = Qubes.Misc.check_memory ~fraction:30 () in
     match translate t packet with
     | Some frame -> (
         let (`IPv4 (hdr, _payload)) = frame in
@@ -358,7 +325,7 @@ module Main (KV : Mirage_kv.RO) = struct
         match Clients.lookup t.clients dest with
         | Some vif ->
             Logs.debug (fun m -> m "Sending a packet to %a" Ipaddr.V4.pp dest);
-            to_client vif frame blit_nat
+            to_client vif frame
         | None ->
             Logs.warn (fun m ->
                 m "%a does not exist as a client" Ipaddr.V4.pp dest);
