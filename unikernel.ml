@@ -251,40 +251,40 @@ module Main (KV : Mirage_kv.RO) = struct
                   Lwt.return_unit
               | Ok dns_packet -> (
                   match
-                    (dns_packet.Dns.Packet.data, dns_packet.Dns.Packet.question)
+                    Dns_server.handle_question primary_t
+                      dns_packet.Dns.Packet.question
                   with
-                  | `Query, (name, `Any) | `Query, (name, `K _) -> (
-                      match
-                        Dns_trie.entries name
-                          (Dns_server.Primary.data primary_t)
-                      with
-                      | Error _ ->
-                          (* The domain is not found in the blocking list, forward upstream for resolution *)
-                          nat_and_forward t packet
-                      | Ok (_soa, _map) ->
-                          (* construct a Nat_packet for that client with a DNS answer saying that the name is associated with localhost *)
-                          let ip_hdr : Ipv4_packet.t =
-                            {
-                              hdr with
-                              src = hdr.Ipv4_packet.dst;
-                              dst = hdr.Ipv4_packet.src;
-                            }
-                          in
-                          (* TODO: create the correct Cstruct *)
-                          let reply = Cstruct.empty in
-                          let ip_payload =
-                            match l4_hdr with
-                            | `TCP tcp -> `TCP (tcp, reply)
-                            | `UDP udp -> `UDP (udp, reply)
-                            | _ -> assert false (* ICMP should not be here *)
-                          in
-                          let nat_packet : Nat_packet.t =
-                            `IPv4 (ip_hdr, ip_payload)
-                          in
-                          to_client vif nat_packet)
-                  | _ ->
-                      (* Every other DNS packets from client: drop? *)
-                      Lwt.return_unit))
+                  | Error _ ->
+                      (* The domain is not found in the blocking list, forward upstream for resolution *)
+                      nat_and_forward t packet
+                  | Ok (flags, data, additional) ->
+                      (* construct a Nat_packet for that client with a DNS answer saying that the name is associated with localhost *)
+                      let ip_hdr : Ipv4_packet.t =
+                        {
+                          hdr with
+                          src = hdr.Ipv4_packet.dst;
+                          dst = hdr.Ipv4_packet.src;
+                        }
+                      in
+                      let reply =
+                        Dns.Packet.create ?additional
+                          (fst dns_packet.Dns.Packet.header, flags)
+                          dns_packet.Dns.Packet.question (`Answer data)
+                      in
+                      let ip_payload =
+                        match l4_hdr with
+                        | `TCP tcp ->
+                            let reply_str, _max_size = Dns.Packet.encode `Tcp reply in
+                            `TCP (tcp, Cstruct.of_string reply_str)
+                        | `UDP udp ->
+                            let reply_str, _max_size = Dns.Packet.encode `Udp reply in
+                            `UDP (udp, Cstruct.of_string reply_str)
+                        | _ -> assert false (* ICMP should not be here *)
+                      in
+                      let nat_packet : Nat_packet.t =
+                        `IPv4 (ip_hdr, ip_payload)
+                      in
+                      to_client vif nat_packet))
         else nat_and_forward t packet
 
   (* uplink packets uplink to the destination client *)
@@ -473,9 +473,7 @@ module Main (KV : Mirage_kv.RO) = struct
       | Ok list -> parse_domain_file list
     in
     let trie = List.fold_right add_dns_entries domains Dns_trie.empty in
-    let primary_t =
-      Dns_server.Primary.create ~rng:Mirage_crypto_rng.generate trie
-    in
+    let primary_t = Dns_server.create trie Mirage_crypto_rng.generate in
     Logs.debug (fun m -> m "Blocklist file loaded");
 
     Netif.connect "0" >>= fun net ->
