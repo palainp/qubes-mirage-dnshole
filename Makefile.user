@@ -1,0 +1,5 @@
+unikernel: build
+	cp dist/qubes-dnshole.xen dist/qubes-dnshole.xen.debug
+	strip dist/qubes-dnshole.xen
+	cp dist/qubes-dnshole.xen .
+	sha256sum qubes-dnshole.xen
