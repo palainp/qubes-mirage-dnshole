@@ -274,10 +274,14 @@ module Main (KV : Mirage_kv.RO) = struct
                       let ip_payload =
                         match l4_hdr with
                         | `TCP tcp ->
-                            let reply_str, _max_size = Dns.Packet.encode `Tcp reply in
+                            let reply_str, _max_size =
+                              Dns.Packet.encode `Tcp reply
+                            in
                             `TCP (tcp, Cstruct.of_string reply_str)
                         | `UDP udp ->
-                            let reply_str, _max_size = Dns.Packet.encode `Udp reply in
+                            let reply_str, _max_size =
+                              Dns.Packet.encode `Udp reply
+                            in
                             `UDP (udp, Cstruct.of_string reply_str)
                         | _ -> assert false (* ICMP should not be here *)
                       in
