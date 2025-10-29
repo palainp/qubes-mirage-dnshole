@@ -49,7 +49,7 @@ qvm-volume import sys-mirage-dnshole:root tracking.tar
 ```
 You also may want to name differently you blocking list, or store multiple different files in the same tarball. To change the file read in the tarball, you need to change the command line parameter of the unikernel:
 ```
-qvm-prefs --set sys-mirage-dnshole -- kernelopts '--blocking-name=theotherlist.txt'
+qvm-prefs --set sys-mirage-dnshole -- kernelopts '--blocklist-name=theotherlistname.txt'
 ```
 
 Various notes
