@@ -35,7 +35,7 @@ Run those commands in dom0 to create a `sys-mirage-dnshole` kernel and an AppVM 
 ```bash
 mkdir -p /var/lib/qubes/vm-kernels/mirage-dnshole/
 cd /var/lib/qubes/vm-kernels/mirage-dnshole/
-qvm-run -p dev 'cat mirage-hole/dist/mirage-dnshole.xen' > vmlinuz
+qvm-run -p dev 'cat qubes-mirage-hole/dist/qubes-dnshole.xen' > vmlinuz
 qvm-create \
   --property kernel=mirage-dnshole \
   --property kernelopts='' \
