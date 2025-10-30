@@ -11,19 +11,28 @@ This unikernel serves as an "in-chain" service virtual machine which:
   - forward to uplink if not
   - every other packets are forwarded uplink
 
+The blocking list is loaded from a tar file dumped as the root disk of the AppVM, and is read-only. In order to update the list, you'll need to re-run the `qvm-volume import` command.
 
 Building and running as Qubes AppVM
 -----------------------------------
-To build:
-```
+To build, you can either compile it with a configured opam environnement:
+```bash
 mirage configure -t xen
 make depend
 make build
 ```
+Or using the docker/podman script, e.g. with podman:
+```bash
+sudo systemctl start podman
+git clone https://github.com/palainp/qubes-mirage-dnshole.git
+cd qubes-mirage-dnshole
+./build-with.sh podman
+```
+And check the resulting hashsum.
 
 To create a Qubes AppVM (this is similar to the procedure for qubes-mirage-firewall):
 Run those commands in dom0 to create a `sys-mirage-dnshole` kernel and an AppVM using that kernel (replace the name of your AppVM where you build your unikernel `dev`, and the corresponding directory `sys-mirage-dnshole`):
-```
+```bash
 mkdir -p /var/lib/qubes/vm-kernels/mirage-dnshole/
 cd /var/lib/qubes/vm-kernels/mirage-dnshole/
 qvm-run -p dev 'cat mirage-hole/dist/mirage-dnshole.xen' > vmlinuz
@@ -43,12 +52,12 @@ qvm-features sys-mirage-dnshole no-default-kernelopts 1
 ```
 
 In order to use it, you will also need to download a blocking list (or create it by yourself), tar store it, as a tarball in the root volume of your unikernel VM:
-```
+```bash
 qvm-run -p dev 'curl https://blocklistproject.github.io/Lists/tracking.txt -o tracking.txt && tar cvf tracking.tar tracking.txt && cat tracking.tar' > tracking.tar
 qvm-volume import sys-mirage-dnshole:root tracking.tar
 ```
 You also may want to name differently you blocking list, or store multiple different files in the same tarball. To change the file read in the tarball, you need to change the command line parameter of the unikernel:
-```
+```bash
 qvm-prefs --set sys-mirage-dnshole -- kernelopts '--blocklist-name=theotherlistname.txt'
 ```
 
