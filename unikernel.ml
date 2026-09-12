@@ -139,21 +139,23 @@ module Main (KV : Mirage_kv.RO) = struct
         let uplink = t.uplink.eth in
         let netif = t.uplink.net in
         let fragments = ref [] in
-        let max_payload = Vif.Netif.max_frame_size netif - Ethernet.Packet.sizeof_ethernet in
+        let max_payload =
+          Vif.Netif.max_frame_size netif - Ethernet.Packet.sizeof_ethernet
+        in
         let size =
           if max_payload <= Eth.mtu uplink then max_payload
           else min (Nat_packet.length packet) max_payload
         in
         write_frame uplink netif ~where:"error trying to send to upstream"
           ~dst:(Eth.mac uplink) ~proto:`IPv4 ~size (fun b ->
-          match Nat_packet.into_cstruct packet b with
-          | Error e ->
-              Log.warn (fun f ->
-                  f "Failed to write packet: %a" Nat_packet.pp_error e);
-              0
-          | Ok (n, frags) ->
-              fragments := frags;
-              n)
+            match Nat_packet.into_cstruct packet b with
+            | Error e ->
+                Log.warn (fun f ->
+                    f "Failed to write packet: %a" Nat_packet.pp_error e);
+                0
+            | Ok (n, frags) ->
+                fragments := frags;
+                n)
         >>= fun () ->
         Lwt_list.iter_s
           (fun f ->
@@ -176,21 +178,23 @@ module Main (KV : Mirage_kv.RO) = struct
         let client = vif.Vif.ethernet in
         let netif = vif.Vif.backend in
         let fragments = ref [] in
-        let max_payload = Vif.Netif.max_frame_size netif - Ethernet.Packet.sizeof_ethernet in
+        let max_payload =
+          Vif.Netif.max_frame_size netif - Ethernet.Packet.sizeof_ethernet
+        in
         let size =
           if max_payload <= Eth.mtu client then max_payload
           else min (Nat_packet.length packet) max_payload
         in
         write_frame client netif ~where:"error trying to send to client"
           ~dst:(snd vif.Vif.mac) ~proto:`IPv4 ~size (fun b ->
-          match Nat_packet.into_cstruct packet b with
-          | Error e ->
-              Log.warn (fun f ->
-                  f "Failed to write packet: %a" Nat_packet.pp_error e);
-              0
-          | Ok (n, frags) ->
-              fragments := frags;
-              n)
+            match Nat_packet.into_cstruct packet b with
+            | Error e ->
+                Log.warn (fun f ->
+                    f "Failed to write packet: %a" Nat_packet.pp_error e);
+                0
+            | Ok (n, frags) ->
+                fragments := frags;
+                n)
         >>= fun () ->
         Lwt_list.iter_s
           (fun f ->
