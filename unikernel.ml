@@ -5,9 +5,8 @@ open Cmdliner
 let ( let* ) = Lwt.bind
 let ( % ) f g = fun x -> f (g x)
 
-module Netif = Netif.Make (Xenstore.Make (Xen_os.Xs))
-module UplinkEth = Ethernet.Make (Netif)
-module Arp = Arp.Make (UplinkEth)
+module Eth = Vif.Eth
+module Arp = Arp.Make (Eth)
 
 let src = Logs.Src.create "unikernel" ~doc:"Main unikernel code"
 
@@ -24,8 +23,8 @@ let blocklist_name =
 module Main (KV : Mirage_kv.RO) = struct
   type uplink = {
     mutable fragments : Fragments.Cache.t;
-    net : Netif.t;
-    eth : UplinkEth.t;
+    net : Vif.Netif.t;
+    eth : Eth.t;
     arp : Arp.t;
     ip : Ipaddr.V4.t;
   }
@@ -102,36 +101,67 @@ module Main (KV : Mirage_kv.RO) = struct
         Log.warn (fun f -> f "Unknown command %S" cmd);
         return 1
 
+  (* Ethernet.write refuses any size above the MTU, and an aggregated frame is
+     larger than its link on purpose. For those, put the fourteen header bytes in
+     ourselves and hand the frame to the device. *)
+  let write_frame eth netif ~where ~dst ~proto ?size fillfn =
+    match size with
+    | Some size when size > Eth.mtu eth -> (
+        let hdr =
+          {
+            Ethernet.Packet.source = Eth.mac eth;
+            destination = dst;
+            ethertype = proto;
+          }
+        in
+        let header_size = Ethernet.Packet.sizeof_ethernet in
+        Vif.Netif.write netif ~size:(header_size + size) (fun frame ->
+            match Ethernet.Packet.into_cstruct hdr frame with
+            | Error msg ->
+                Log.err (fun f -> f "%s: bad ethernet header: %s" where msg);
+                0
+            | Ok () -> header_size + fillfn (Cstruct.shift frame header_size))
+        >|= function
+        | Ok () -> ()
+        | Error e ->
+            Log.err (fun f ->
+                f "%s: failed to send a %d byte frame: %a" where size
+                  Vif.Netif.pp_error e))
+    | _ -> (
+        Eth.write eth dst proto ?size fillfn >|= function
+        | Ok () -> ()
+        | Error e -> Log.err (fun f -> f "%s: @[%a@]" where Eth.pp_error e))
+
   (* Write a Nat_packet to the uplink interface *)
   let to_upstream t packet =
     Lwt.catch
       (fun () ->
         let uplink = t.uplink.eth in
+        let netif = t.uplink.net in
         let fragments = ref [] in
-        ( UplinkEth.write uplink (UplinkEth.mac uplink) `IPv4 (fun b ->
-              match Nat_packet.into_cstruct packet b with
-              | Error e ->
-                  Log.warn (fun f ->
-                      f "Failed to write packet: %a" Nat_packet.pp_error e);
-                  0
-              | Ok (n, frags) ->
-                  fragments := frags;
-                  n)
-        >|= function
-          | Ok () -> ()
-          | Error _e -> Log.err (fun f -> f "error trying to send to upstream")
-        )
+        let max_payload = Vif.Netif.max_frame_size netif - Ethernet.Packet.sizeof_ethernet in
+        let size =
+          if max_payload <= Eth.mtu uplink then max_payload
+          else min (Nat_packet.length packet) max_payload
+        in
+        write_frame uplink netif ~where:"error trying to send to upstream"
+          ~dst:(Eth.mac uplink) ~proto:`IPv4 ~size (fun b ->
+          match Nat_packet.into_cstruct packet b with
+          | Error e ->
+              Log.warn (fun f ->
+                  f "Failed to write packet: %a" Nat_packet.pp_error e);
+              0
+          | Ok (n, frags) ->
+              fragments := frags;
+              n)
         >>= fun () ->
         Lwt_list.iter_s
           (fun f ->
             let size = Cstruct.length f in
-            UplinkEth.write uplink (UplinkEth.mac uplink) `IPv4 (fun b ->
+            write_frame uplink netif ~where:"error trying to send to upstream"
+              ~dst:(Eth.mac uplink) ~proto:`IPv4 ~size (fun b ->
                 Cstruct.blit f 0 b 0 size;
-                size)
-            >|= function
-            | Ok () -> ()
-            | Error _e ->
-                Log.err (fun f -> f "error trying to send to upstream"))
+                size))
           !fragments)
       (fun ex ->
         Log.err (fun f ->
@@ -143,31 +173,32 @@ module Main (KV : Mirage_kv.RO) = struct
   let to_client vif packet =
     Lwt.catch
       (fun () ->
+        let client = vif.Vif.ethernet in
+        let netif = vif.Vif.backend in
         let fragments = ref [] in
-        ( Vif.Client_ethernet.write vif.Vif.ethernet (snd vif.mac) `IPv4
-            (fun b ->
-              match Nat_packet.into_cstruct packet b with
-              | Error e ->
-                  Log.warn (fun f ->
-                      f "Failed to write packet: %a" Nat_packet.pp_error e);
-                  0
-              | Ok (n, frags) ->
-                  fragments := frags;
-                  n)
-        >|= function
-          | Ok () -> ()
-          | Error _e -> Log.err (fun f -> f "error trying to send to client") )
+        let max_payload = Vif.Netif.max_frame_size netif - Ethernet.Packet.sizeof_ethernet in
+        let size =
+          if max_payload <= Eth.mtu client then max_payload
+          else min (Nat_packet.length packet) max_payload
+        in
+        write_frame client netif ~where:"error trying to send to client"
+          ~dst:(snd vif.Vif.mac) ~proto:`IPv4 ~size (fun b ->
+          match Nat_packet.into_cstruct packet b with
+          | Error e ->
+              Log.warn (fun f ->
+                  f "Failed to write packet: %a" Nat_packet.pp_error e);
+              0
+          | Ok (n, frags) ->
+              fragments := frags;
+              n)
         >>= fun () ->
         Lwt_list.iter_s
           (fun f ->
             let size = Cstruct.length f in
-            Vif.Client_ethernet.write vif.Vif.ethernet (snd vif.mac) `IPv4
-              (fun b ->
+            write_frame client netif ~where:"error trying to send to client"
+              ~dst:(snd vif.Vif.mac) ~proto:`IPv4 ~size (fun b ->
                 Cstruct.blit f 0 b 0 size;
-                size)
-            >|= function
-            | Ok () -> ()
-            | Error _e -> Log.err (fun f -> f "error trying to send to client"))
+                size))
           !fragments)
       (fun ex ->
         (* Usually Netback_shutdown, because the client disconnected *)
@@ -313,11 +344,11 @@ module Main (KV : Mirage_kv.RO) = struct
 
   (* wait for uplink packets and put them into [t.oc] *)
   let uplink_loop t =
-    Netif.listen t.uplink.net ~header_size:Ethernet.Packet.sizeof_ethernet
+    Vif.Netif.listen t.uplink.net ~header_size:Ethernet.Packet.sizeof_ethernet
       (fun frame ->
         let now = Mirage_mtime.elapsed_ns () in
         (* Handle one Ethernet frame from NetVM *)
-        UplinkEth.input t.uplink.eth ~arpv4:(Arp.input t.uplink.arp)
+        Eth.input t.uplink.eth ~arpv4:(Arp.input t.uplink.arp)
           ~ipv4:(fun ip ->
             let fragments, r =
               Nat_packet.of_ipv4_packet t.uplink.fragments ~now ip
@@ -333,13 +364,13 @@ module Main (KV : Mirage_kv.RO) = struct
             | Ok (Some packet) -> handle_uplink t packet)
           ~ipv6:(fun _ip -> Lwt.return_unit)
           frame)
-    >|= or_raise "Uplink listen loop" Netif.pp_error
+    >|= or_raise "Uplink listen loop" Vif.Netif.pp_error
 
   (* Create a vif dedicated for a new client *)
   let add_vif t primary_t ~finalisers
       ({ Dao.Client_vif.domid; device_id } as client_vif) ipaddr () =
     let open Lwt.Infix in
-    let* backend = Vif.Netbackend.make_backend ~domid ~device_id in
+    let* backend = Vif.Netif.make_backend ~domid ~device_id in
     let gateway = Clients.default_gateway t.clients in
     let* vif = Vif.make backend client_vif ~gateway ipaddr in
     let* () = Clients.add_client t.clients vif in
@@ -379,10 +410,10 @@ module Main (KV : Mirage_kv.RO) = struct
               | `IPv6 -> Lwt.return_unit)
         in
         Logs.debug (fun m -> m "%a starts to listen packets" Vif.pp vif);
-        Vif.Netbackend.listen backend ~header_size input >>= function
+        Vif.Netif.listen backend ~header_size input >>= function
         | Error err ->
             Logs.err (fun m ->
-                m "Private interface %a stopped: %a" Vif.Netbackend.pp_error err
+                m "Private interface %a stopped: %a" Vif.Netif.pp_error err
                   Vif.pp vif);
             Lwt.return_unit
         | Ok () ->
@@ -480,8 +511,8 @@ module Main (KV : Mirage_kv.RO) = struct
     let primary_t = Dns_server.create trie Mirage_crypto_rng.generate in
     Logs.debug (fun m -> m "Blocklist file loaded");
 
-    Netif.connect "0" >>= fun net ->
-    UplinkEth.connect net >>= fun eth ->
+    Vif.Netif.connect "0" >>= fun net ->
+    Eth.connect net >>= fun eth ->
     Arp.connect eth >>= fun arp ->
     let* cfg = Dao.read_network_config qubesDB in
     let clients = Clients.create cfg in
