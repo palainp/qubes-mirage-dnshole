@@ -1,4 +1,4 @@
-module Netbackend = Backend.Make (Xenstore.Make (Xen_os.Xs))
+module Netbackend = Netif.Make (Xenstore.Make (Xen_os.Xs))
 
 (* NOTE(dinosaure): [Backend] comes from [mirage-net-xen]
 

@@ -1,4 +1,4 @@
-module Netbackend : module type of Backend.Make (Xenstore.Make (Xen_os.Xs))
+module Netbackend : module type of Netif.Make (Xenstore.Make (Xen_os.Xs))
 module Client_ethernet : module type of Ethernet.Make (Netbackend)
 module Client_arp : Arp.S
 

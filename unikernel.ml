@@ -5,6 +5,7 @@ open Cmdliner
 let ( let* ) = Lwt.bind
 let ( % ) f g = fun x -> f (g x)
 
+module Netif = Netif.Make (Xenstore.Make (Xen_os.Xs))
 module UplinkEth = Ethernet.Make (Netif)
 module Arp = Arp.Make (UplinkEth)
 
@@ -338,7 +339,7 @@ module Main (KV : Mirage_kv.RO) = struct
   let add_vif t primary_t ~finalisers
       ({ Dao.Client_vif.domid; device_id } as client_vif) ipaddr () =
     let open Lwt.Infix in
-    let* backend = Vif.Netbackend.make ~domid ~device_id in
+    let* backend = Vif.Netbackend.make_backend ~domid ~device_id in
     let gateway = Clients.default_gateway t.clients in
     let* vif = Vif.make backend client_vif ~gateway ipaddr in
     let* () = Clients.add_client t.clients vif in
@@ -443,7 +444,6 @@ module Main (KV : Mirage_kv.RO) = struct
     let start_time = Mirage_mtime.elapsed_ns () in
     (* Start qrexec agent and QubesDB agent in parallel *)
     let* qrexec = RExec.connect ~domid:0 () in
-    let agent_listener = RExec.listen qrexec command_handler in
 
     let* qubesDB = DB.connect ~domid:0 () in
 
@@ -501,7 +501,7 @@ module Main (KV : Mirage_kv.RO) = struct
     let* () =
       Lwt.pick
         [
-          agent_listener;
+          RExec.listen qrexec ~handler:command_handler ();
           Qubes.Misc.shutdown;
           uplink_loop t;
           wait_clients t primary_t;

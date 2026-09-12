@@ -1,4 +1,4 @@
-(* mirage >= 4.9.0 & < 4.11.0 *)
+(* mirage >= 4.9.0 & < 4.12.0 *)
 
 open Mirage
 
@@ -13,15 +13,15 @@ let main =
         package "vchan" ~min:"4.0.2";
         package "cstruct";
         package "tcpip" ~min:"3.7.0";
-        package ~sublibs:[ "mirage" ] "arp" ~min:"2.3.0";
+        package ~sublibs:[ "mirage" ] "arp" ~min:"4.1.0";
         package "ethernet" ~min:"3.0.0";
         package "shared-memory-ring" ~min:"3.0.0";
-        package "mirage-net-xen" ~min:"2.1.4";
+        package "mirage-net-xen" ~min:"2.1.8";
         package "ipaddr" ~min:"5.2.0";
-        package "mirage-qubes" ~min:"0.9.1";
+        package "mirage-qubes" ~min:"2.0.1";
         package "mirage-nat" ~min:"3.0.1";
         package "mirage-logs";
-        package "mirage-xen" ~min:"8.0.0";
+        package "mirage-xen" ~min:"9.0.1";
         package "dns";
         package "dns-server";
       ]
