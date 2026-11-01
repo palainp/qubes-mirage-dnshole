@@ -1,3 +1,7 @@
+### 0.2.1 (2026-11-01)
+
+- Update ecosystem, PR #7 @palainp
+
 ### 0.2.0 (2026-09-12)
 
 - Update to newer ecosystem (Ocaml 5.5, mirage-net-xen with GSO, mirage-qubes with quick_stat issue #3), PR #5 @palainp
