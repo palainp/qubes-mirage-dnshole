@@ -35,6 +35,7 @@ module Main (KV : Mirage_kv.RO) = struct
         (* dns0 and dns1 from qubesDB, and the resolver address from command line *)
     dns : Ipaddr.V4.t * Ipaddr.V4.t;
     clients : Clients.t;
+    notifier : Notification.t option;
   }
 
   let or_raise msg pp = function
@@ -295,6 +296,16 @@ module Main (KV : Mirage_kv.RO) = struct
                       nat_and_forward t packet
                   | Ok (flags, data, additional) ->
                       (* construct a Nat_packet for that client with a DNS answer saying that the name is associated with localhost *)
+                      (match t.notifier with
+                      | Some notifier ->
+                        Lwt.async (fun () ->
+                          let domain = Domain_name.to_string (fst dns_packet.Dns.Packet.question) in
+                          Notification.notify notifier
+                            ~body:(Fmt.str "%s (requested by %a)" domain Ipaddr.V4.pp hdr.Ipv4_packet.src)
+                            "Blocked domain" >|= function
+                          | Ok () -> ()
+                          | Error e -> Log.warn (fun f -> f "qubes.Notifications: %s" e))
+                      | None -> ());
                       let ip_hdr : Ipv4_packet.t =
                         {
                           hdr with
@@ -479,6 +490,13 @@ module Main (KV : Mirage_kv.RO) = struct
     let start_time = Mirage_mtime.elapsed_ns () in
     (* Start qrexec agent and QubesDB agent in parallel *)
     let* qrexec = RExec.connect ~domid:0 () in
+    let agent_listener = RExec.listen qrexec ~handler:command_handler () in
+
+    let* notifier = Notification.connect qrexec in
+    let notifier = match notifier with
+      | Ok n -> Some n
+      | Error e -> Log.warn (fun f -> f "qubes.Notifications: %s" e); None
+    in
 
     let* qubesDB = DB.connect ~domid:0 () in
 
@@ -529,6 +547,7 @@ module Main (KV : Mirage_kv.RO) = struct
         uplink = { fragments = fragments_cache; net; eth; arp; ip = cfg.Dao.ip };
         dns = (fst cfg.Dao.dns, snd cfg.Dao.dns);
         clients;
+        notifier;
       }
     in
 
@@ -536,7 +555,7 @@ module Main (KV : Mirage_kv.RO) = struct
     let* () =
       Lwt.pick
         [
-          RExec.listen qrexec ~handler:command_handler ();
+          agent_listener;
           Qubes.Misc.shutdown;
           uplink_loop t;
           wait_clients t primary_t;
