@@ -23,7 +23,9 @@ let blocklist_name =
 let ndomains =
   let doc =
     Arg.info
-      ~doc:"Number of recently notified blocked domains that are not notified again"
+      ~doc:
+        "Number of recently notified blocked domains that are not notified \
+         again"
       [ "ndomains" ]
   in
   Mirage_runtime.register_arg Arg.(value & opt int 32 doc)
@@ -44,7 +46,8 @@ module Main (KV : Mirage_kv.RO) = struct
     dns : Ipaddr.V4.t * Ipaddr.V4.t;
     clients : Clients.t;
     notifier : Notification.t option;
-    notified : string Queue.t; (* last notified domains, oldest first. Avoid spam :) *)
+    notified : string Queue.t;
+        (* last notified domains, oldest first. Avoid spam :) *)
   }
 
   let or_raise msg pp = function
@@ -311,9 +314,14 @@ module Main (KV : Mirage_kv.RO) = struct
                             Domain_name.to_string
                               (fst dns_packet.Dns.Packet.question)
                           in
-                          if not (Seq.exists (String.equal domain) (Queue.to_seq t.notified)) then (
+                          if
+                            not
+                              (Seq.exists (String.equal domain)
+                                 (Queue.to_seq t.notified))
+                          then (
                             Queue.push domain t.notified;
-                            if Queue.length t.notified > ndomains () then ignore(Queue.pop t.notified);
+                            if Queue.length t.notified > ndomains () then
+                              ignore (Queue.pop t.notified);
                             Lwt.async (fun () ->
                                 Notification.notify notifier
                                   ~body:
