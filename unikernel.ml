@@ -20,6 +20,14 @@ let blocklist_name =
   in
   Mirage_runtime.register_arg Arg.(value & opt string "tracking.txt" doc)
 
+let ndomains =
+  let doc =
+    Arg.info
+      ~doc:"Number of recently notified blocked domains that are not notified again"
+      [ "ndomains" ]
+  in
+  Mirage_runtime.register_arg Arg.(value & opt int 32 doc)
+
 module Main (KV : Mirage_kv.RO) = struct
   type uplink = {
     mutable fragments : Fragments.Cache.t;
@@ -36,6 +44,7 @@ module Main (KV : Mirage_kv.RO) = struct
     dns : Ipaddr.V4.t * Ipaddr.V4.t;
     clients : Clients.t;
     notifier : Notification.t option;
+    notified : string Queue.t; (* last notified domains, oldest first. Avoid spam :) *)
   }
 
   let or_raise msg pp = function
@@ -298,21 +307,24 @@ module Main (KV : Mirage_kv.RO) = struct
                       (* construct a Nat_packet for that client with a DNS answer saying that the name is associated with localhost *)
                       (match t.notifier with
                       | Some notifier ->
-                          Lwt.async (fun () ->
-                              let domain =
-                                Domain_name.to_string
-                                  (fst dns_packet.Dns.Packet.question)
-                              in
-                              Notification.notify notifier
-                                ~body:
-                                  (Fmt.str "%s (requested by %a)" domain
-                                     Ipaddr.V4.pp hdr.Ipv4_packet.src)
-                                "Blocked domain"
-                              >|= function
-                              | Ok () -> ()
-                              | Error e ->
-                                  Log.warn (fun f ->
-                                      f "qubes.Notifications: %s" e))
+                          let domain =
+                            Domain_name.to_string
+                              (fst dns_packet.Dns.Packet.question)
+                          in
+                          if not (Seq.exists (String.equal domain) (Queue.to_seq t.notified)) then (
+                            Queue.push domain t.notified;
+                            if Queue.length t.notified > ndomains () then ignore(Queue.pop t.notified);
+                            Lwt.async (fun () ->
+                                Notification.notify notifier
+                                  ~body:
+                                    (Fmt.str "%s (requested by %a)" domain
+                                       Ipaddr.V4.pp hdr.Ipv4_packet.src)
+                                  "Blocked domain"
+                                >|= function
+                                | Ok () -> ()
+                                | Error e ->
+                                    Log.warn (fun f ->
+                                        f "qubes.Notifications: %s" e)))
                       | None -> ());
                       let ip_hdr : Ipv4_packet.t =
                         {
@@ -584,6 +596,7 @@ module Main (KV : Mirage_kv.RO) = struct
         dns = (fst cfg.Dao.dns, snd cfg.Dao.dns);
         clients;
         notifier;
+        notified = Queue.create ();
       }
     in
 
