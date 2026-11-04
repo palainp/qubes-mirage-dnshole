@@ -504,7 +504,8 @@ module Main (KV : Mirage_kv.RO) = struct
             GUI.listen gui ())
           (fun _ -> Lwt.return_unit)
           (fun ex ->
-            Log.warn (fun f -> f "GUI thread failed: %s" (Printexc.to_string ex));
+            Log.warn (fun f ->
+                f "GUI thread failed: %s" (Printexc.to_string ex));
             Lwt.return_unit))
 
   (* Main unikernel entry point (called from auto-generated main.ml). *)
