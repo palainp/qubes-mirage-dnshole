@@ -489,16 +489,24 @@ module Main (KV : Mirage_kv.RO) = struct
     let open Lwt.Syntax in
     let start_time = Mirage_mtime.elapsed_ns () in
     (* Start qrexec agent and QubesDB agent in parallel *)
+    let* qubesDB = DB.connect ~domid:0 () in
     let* qrexec = RExec.connect ~domid:0 () in
     let agent_listener = RExec.listen qrexec ~handler:command_handler () in
 
-    let* notifier = Notification.connect qrexec in
+    (* The timeout is here to ensure we do not stay blocked waiting for the
+       notification service *)
+    let* notifier =
+      Lwt.pick
+        [
+          Notification.connect qrexec;
+          (Mirage_sleep.ns (Duration.of_sec 5) >|= fun () ->
+            Error "notification connection timed out");
+        ]
+    in
     let notifier = match notifier with
       | Ok n -> Some n
       | Error e -> Log.warn (fun f -> f "qubes.Notifications: %s" e); None
     in
-
-    let* qubesDB = DB.connect ~domid:0 () in
 
     let startup_time =
       let ( - ) = Int64.sub in

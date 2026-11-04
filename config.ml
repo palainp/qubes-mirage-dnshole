@@ -24,6 +24,7 @@ let main =
         package "mirage-xen" ~min:"9.0.1";
         package "dns";
         package "dns-server";
+        package "duration";
       ]
     "Unikernel.Main" (kv_ro @-> job)
 
