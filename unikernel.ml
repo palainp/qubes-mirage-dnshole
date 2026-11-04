@@ -492,6 +492,21 @@ module Main (KV : Mirage_kv.RO) = struct
     add_new_clients (Dao.Vif_map.to_seq m) >|= fun () ->
     Logs.debug (fun m -> m "The unikernel is in-sync with the network topology")
 
+  (* GUI agent, unused but needed: dom0's qubes.WaitForSession waits for guid-running.ID,
+     which qubes.Notifications requires. Not awaited, and its failure must not stop the
+     unikernel. *)
+  let watch_gui gui =
+    Lwt.async (fun () ->
+        Lwt.try_bind
+          (fun () ->
+            gui >>= fun gui ->
+            Log.info (fun f -> f "GUI agent connected");
+            GUI.listen gui ())
+          (fun _ -> Lwt.return_unit)
+          (fun ex ->
+            Log.warn (fun f -> f "GUI thread failed: %s" (Printexc.to_string ex));
+            Lwt.return_unit))
+
   (* Main unikernel entry point (called from auto-generated main.ml). *)
   let start disk =
     let open Lwt.Syntax in
@@ -500,6 +515,7 @@ module Main (KV : Mirage_kv.RO) = struct
     let* qubesDB = DB.connect ~domid:0 () in
     let* qrexec = RExec.connect ~domid:0 () in
     let agent_listener = RExec.listen qrexec ~handler:command_handler () in
+    GUI.connect ~domid:0 () |> watch_gui;
 
     (* The timeout is here to ensure we do not stay blocked waiting for the
        notification service *)
