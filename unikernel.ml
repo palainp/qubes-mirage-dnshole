@@ -298,13 +298,21 @@ module Main (KV : Mirage_kv.RO) = struct
                       (* construct a Nat_packet for that client with a DNS answer saying that the name is associated with localhost *)
                       (match t.notifier with
                       | Some notifier ->
-                        Lwt.async (fun () ->
-                          let domain = Domain_name.to_string (fst dns_packet.Dns.Packet.question) in
-                          Notification.notify notifier
-                            ~body:(Fmt.str "%s (requested by %a)" domain Ipaddr.V4.pp hdr.Ipv4_packet.src)
-                            "Blocked domain" >|= function
-                          | Ok () -> ()
-                          | Error e -> Log.warn (fun f -> f "qubes.Notifications: %s" e))
+                          Lwt.async (fun () ->
+                              let domain =
+                                Domain_name.to_string
+                                  (fst dns_packet.Dns.Packet.question)
+                              in
+                              Notification.notify notifier
+                                ~body:
+                                  (Fmt.str "%s (requested by %a)" domain
+                                     Ipaddr.V4.pp hdr.Ipv4_packet.src)
+                                "Blocked domain"
+                              >|= function
+                              | Ok () -> ()
+                              | Error e ->
+                                  Log.warn (fun f ->
+                                      f "qubes.Notifications: %s" e))
                       | None -> ());
                       let ip_hdr : Ipv4_packet.t =
                         {
@@ -499,13 +507,16 @@ module Main (KV : Mirage_kv.RO) = struct
       Lwt.pick
         [
           Notification.connect qrexec;
-          (Mirage_sleep.ns (Duration.of_sec 5) >|= fun () ->
-            Error "notification connection timed out");
+          ( Mirage_sleep.ns (Duration.of_sec 5) >|= fun () ->
+            Error "notification connection timed out" );
         ]
     in
-    let notifier = match notifier with
+    let notifier =
+      match notifier with
       | Ok n -> Some n
-      | Error e -> Log.warn (fun f -> f "qubes.Notifications: %s" e); None
+      | Error e ->
+          Log.warn (fun f -> f "qubes.Notifications: %s" e);
+          None
     in
 
     let startup_time =
