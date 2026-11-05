@@ -18,12 +18,13 @@ let main =
         package "shared-memory-ring" ~min:"3.0.0";
         package "mirage-net-xen" ~min:"2.1.8";
         package "ipaddr" ~min:"5.2.0";
-        package "mirage-qubes" ~min:"2.0.1";
+        package "mirage-qubes" ~min:"2.1.0";
         package "mirage-nat" ~min:"3.0.1";
         package "mirage-logs";
         package "mirage-xen" ~min:"9.0.1";
         package "dns";
         package "dns-server";
+        package "duration";
       ]
     "Unikernel.Main" (kv_ro @-> job)
 

@@ -20,6 +20,16 @@ let blocklist_name =
   in
   Mirage_runtime.register_arg Arg.(value & opt string "tracking.txt" doc)
 
+let ndomains =
+  let doc =
+    Arg.info
+      ~doc:
+        "Number of recently notified blocked domains that are not notified \
+         again"
+      [ "ndomains" ]
+  in
+  Mirage_runtime.register_arg Arg.(value & opt int 32 doc)
+
 module Main (KV : Mirage_kv.RO) = struct
   type uplink = {
     mutable fragments : Fragments.Cache.t;
@@ -35,6 +45,9 @@ module Main (KV : Mirage_kv.RO) = struct
         (* dns0 and dns1 from qubesDB, and the resolver address from command line *)
     dns : Ipaddr.V4.t * Ipaddr.V4.t;
     clients : Clients.t;
+    notifier : Notification.t option;
+    notified : string Queue.t;
+        (* last notified domains, oldest first. Avoid spam :) *)
   }
 
   let or_raise msg pp = function
@@ -295,6 +308,32 @@ module Main (KV : Mirage_kv.RO) = struct
                       nat_and_forward t packet
                   | Ok (flags, data, additional) ->
                       (* construct a Nat_packet for that client with a DNS answer saying that the name is associated with localhost *)
+                      (match t.notifier with
+                      | Some notifier ->
+                          let domain =
+                            Domain_name.to_string
+                              (fst dns_packet.Dns.Packet.question)
+                          in
+                          if
+                            not
+                              (Seq.exists (String.equal domain)
+                                 (Queue.to_seq t.notified))
+                          then (
+                            Queue.push domain t.notified;
+                            if Queue.length t.notified > ndomains () then
+                              ignore (Queue.pop t.notified);
+                            Lwt.async (fun () ->
+                                Notification.notify notifier
+                                  ~body:
+                                    (Fmt.str "%s (requested by %a)" domain
+                                       Ipaddr.V4.pp hdr.Ipv4_packet.src)
+                                  "Blocked domain"
+                                >|= function
+                                | Ok () -> ()
+                                | Error e ->
+                                    Log.warn (fun f ->
+                                        f "qubes.Notifications: %s" e)))
+                      | None -> ());
                       let ip_hdr : Ipv4_packet.t =
                         {
                           hdr with
@@ -473,14 +512,49 @@ module Main (KV : Mirage_kv.RO) = struct
     add_new_clients (Dao.Vif_map.to_seq m) >|= fun () ->
     Logs.debug (fun m -> m "The unikernel is in-sync with the network topology")
 
+  (* GUI agent, unused but needed: dom0's qubes.WaitForSession waits for guid-running.ID,
+     which qubes.Notifications requires. Not awaited, and its failure must not stop the
+     unikernel. *)
+  let watch_gui gui =
+    Lwt.async (fun () ->
+        Lwt.try_bind
+          (fun () ->
+            gui >>= fun gui ->
+            Log.info (fun f -> f "GUI agent connected");
+            GUI.listen gui ())
+          (fun _ -> Lwt.return_unit)
+          (fun ex ->
+            Log.warn (fun f ->
+                f "GUI thread failed: %s" (Printexc.to_string ex));
+            Lwt.return_unit))
+
   (* Main unikernel entry point (called from auto-generated main.ml). *)
   let start disk =
     let open Lwt.Syntax in
     let start_time = Mirage_mtime.elapsed_ns () in
     (* Start qrexec agent and QubesDB agent in parallel *)
-    let* qrexec = RExec.connect ~domid:0 () in
-
     let* qubesDB = DB.connect ~domid:0 () in
+    let* qrexec = RExec.connect ~domid:0 () in
+    let agent_listener = RExec.listen qrexec ~handler:command_handler () in
+    GUI.connect ~domid:0 () |> watch_gui;
+
+    (* The timeout is here to ensure we do not stay blocked waiting for the
+       notification service *)
+    let* notifier =
+      Lwt.pick
+        [
+          Notification.connect qrexec;
+          ( Mirage_sleep.ns (Duration.of_sec 5) >|= fun () ->
+            Error "notification connection timed out" );
+        ]
+    in
+    let notifier =
+      match notifier with
+      | Ok n -> Some n
+      | Error e ->
+          Log.warn (fun f -> f "qubes.Notifications: %s" e);
+          None
+    in
 
     let startup_time =
       let ( - ) = Int64.sub in
@@ -529,6 +603,8 @@ module Main (KV : Mirage_kv.RO) = struct
         uplink = { fragments = fragments_cache; net; eth; arp; ip = cfg.Dao.ip };
         dns = (fst cfg.Dao.dns, snd cfg.Dao.dns);
         clients;
+        notifier;
+        notified = Queue.create ();
       }
     in
 
@@ -536,7 +612,7 @@ module Main (KV : Mirage_kv.RO) = struct
     let* () =
       Lwt.pick
         [
-          RExec.listen qrexec ~handler:command_handler ();
+          agent_listener;
           Qubes.Misc.shutdown;
           uplink_loop t;
           wait_clients t primary_t;
