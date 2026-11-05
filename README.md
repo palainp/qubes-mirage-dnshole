@@ -7,7 +7,7 @@ This unikernel serves as an "in-chain" service virtual machine which:
   - load at startup a list of blocked domains
   - inspects packets that target the Qubes default resolver addresses (more precisely, it inspects packets that target the same addresses as its DNS resolver addresses taken from QubesDB, see notes below)
   - check it the DNS requested domain is present in the blocked list
-  - reply with "localhost" if it's present
+  - reply with "localhost" if it's present and notify with a popup showing the blocked domain
   - forward to uplink if not
   - every other packets are forwarded uplink
 
@@ -39,8 +39,8 @@ qvm-run -p dev 'cat qubes-mirage-hole/dist/qubes-dnshole.xen' > vmlinuz
 qvm-create \
   --property kernel=mirage-dnshole \
   --property kernelopts='' \
-  --property memory=32 \
-  --property maxmem=32 \
+  --property memory=64 \
+  --property maxmem=64 \
   --property netvm=sys-firewall \
   --property provides_network=True \
   --property vcpus=1 \
