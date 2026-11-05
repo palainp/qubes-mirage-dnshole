@@ -86,8 +86,8 @@ Install the resulting rpm in dom0 and create the qube from the template:
 qvm-template install --skip-start ./qubes-template-mirage-dnshole-*.noarch.rpm
 qvm-create \
   --template mirage-dnshole \
-  --property memory=32 \
-  --property maxmem=32 \
+  --property memory=64 \
+  --property maxmem=64 \
   --property netvm=sys-firewall \
   --property provides_network=True \
   --property vcpus=1 \
