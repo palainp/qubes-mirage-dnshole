@@ -2,8 +2,8 @@
 
 open Mirage
 
-(* xenstore id 51712 is the root volume *)
-let block = block_of_xenstore_id "51712"
+(* xenstore id 51728 is xvdb, the private volume (51712 is xvda, the root volume) *)
+let block = block_of_xenstore_id "51728"
 let disk = tar_kv_ro block
 
 let main =

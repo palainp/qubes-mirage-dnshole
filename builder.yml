@@ -1,0 +1,20 @@
+include:
+  - example-configs/qubes-os-r4.3.yml
+
+distributions:
+  - host-fc41
+
+templates: []
+
+components:
+  - mirage-dnshole:
+      url: https://github.com/palainp/qubes-mirage-dnshole
+      branch: main
+      # tags are not signed yet
+      verification-mode: insecure-skip-checking
+
+# uncomment to use podman instead of the qubes executor
+#executor:
+#  type: podman
+#  options:
+#    image: "qubes-builder-fedora:latest"

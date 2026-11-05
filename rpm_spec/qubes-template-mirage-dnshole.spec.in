@@ -1,0 +1,74 @@
+# Template whose root volume only holds the unikernel and a grub.cfg read by
+# pvgrub2-pvh (kernel=''); layout follows qubes-builderv2 template.spec.
+
+# The .xen is a prebuilt reproducible binary, keep its bytes untouched
+%global debug_package %{nil}
+%global __os_install_post %{nil}
+%global _binaries_in_noarch_packages_terminate_build 0
+
+%global template_name mirage-dnshole
+%global dest_dir /var/lib/qubes/vm-templates/%{template_name}
+
+Name:           qubes-template-%{template_name}
+Version:        @VERSION@
+Release:        @REL@%{?dist}
+Summary:        Qubes OS template running the qubes-mirage-dnshole unikernel
+
+License:        BSD-2-Clause
+URL:            https://github.com/palainp/qubes-mirage-dnshole
+Source0:        qubes-dnshole-%{version}.xen
+Source1:        grub.cfg
+Source2:        template.conf
+BuildArch:      noarch
+BuildRequires:  e2fsprogs
+BuildRequires:  tar
+Provides:       qubes-template
+
+%description
+Template for a service qube that answers DNS requests for blocked domains
+with localhost and forwards everything else upstream. The list of blocked
+domains is read from a tarball imported in the private volume of the qube.
+
+%prep
+
+%build
+mkdir -p rootfs/boot/grub
+install -m 0644 %{SOURCE0} rootfs/boot/qubes-dnshole.xen
+install -m 0644 %{SOURCE1} rootfs/boot/grub/grub.cfg
+# ext2: no journal nor recent ext4 feature for grub to trip on
+truncate -s 16M root.img
+mke2fs -q -t ext2 -d rootfs root.img
+# qvm-template reads the size from the tar header of part 00
+tar --sparse -cf - root.img | split -d -b 1G - root.img.part.
+
+%install
+mkdir -p %{buildroot}%{dest_dir}
+mv root.img.part.* %{buildroot}%{dest_dir}/
+install -m 0664 %{SOURCE2} %{buildroot}%{dest_dir}/template.conf
+for f in whitelisted-appmenus.list vm-whitelisted-appmenuenus.list; do
+    touch %{buildroot}%{dest_dir}/$f
+done
+# real files are created by qvm-template
+touch %{buildroot}%{dest_dir}/root.img
+touch %{buildroot}%{dest_dir}/private.img
+touch %{buildroot}%{dest_dir}/volatile.img
+
+%pre
+echo "***** ERROR: do not install template using rpm/dnf or similar" >&2
+echo "*****        use 'qvm-template install' instead" >&
+exit 1
+
+%files
+%defattr(660,root,qubes,770)
+%attr(2770,root,qubes) %dir %{dest_dir}
+%ghost %{dest_dir}/root.img
+%ghost %{dest_dir}/volatile.img
+%ghost %{dest_dir}/private.img
+%{dest_dir}/root.img.part.*
+%attr(664,root,qubes) %{dest_dir}/template.conf
+%attr(664,root,qubes) %{dest_dir}/whitelisted-appmenus.list
+%attr(664,root,qubes) %{dest_dir}/vm-whitelisted-appmenus
+%attr(664,root,qubes) %{dest_dir}/netvm-whitelisted-appmenus.list
+
+%changelog
+@CHANGELOG@

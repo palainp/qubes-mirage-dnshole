@@ -1,0 +1,9 @@
+host:
+  rpm:
+    build:
+    - rpm_spec/qubes-template-mirage-dnshole.spec
+source:
+  files:
+  # Reproducible release binary, the '#/' suffix gives a per-version distfile name
+  - url: https://github.com/palainp/qubes-mirage-dnshole/releases/download/v@VERSION@/qubes-dnshole.xen#/qubes-dnshole-@VERSION@.xen
+    sha256: rpm_spec/qubes-dnshole-@VERSION@.xen.sha256
