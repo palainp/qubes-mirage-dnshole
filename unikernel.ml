@@ -577,10 +577,10 @@ module Main (KV : Mirage_kv.RO) = struct
       | Error _ ->
           Logs.err (fun m ->
               m
-                 "Expected blocklist file '%s' is absent in the private volume.\n\
-                  Try to run in dom0:\n\
-                 \  qvm-volume import sys-mirage-dnshole:private blocklist.tar\n\
-                  with the tarball containing the blocklist file."
+                "Expected blocklist file '%s' is absent in the private volume.\n\
+                 Try to run in dom0:\n\
+                \  qvm-volume import sys-mirage-dnshole:private blocklist.tar\n\
+                 with the tarball containing the blocklist file."
                 blocklist_name);
           Fmt.failwith "No Blocklist found"
       | Ok list -> parse_domain_file list
