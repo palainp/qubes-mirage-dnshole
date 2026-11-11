@@ -541,7 +541,9 @@ module Main (KV : Mirage_kv.RO) = struct
     let notifier =
       Notification.connect qrexec >|= function
       | Ok n -> Some n
-      | Error e -> Log.warn (fun f -> f "qubes.Notifications: %s" e); None
+      | Error e ->
+          Log.warn (fun f -> f "qubes.Notifications: %s" e);
+          None
     in
 
     let startup_time =
