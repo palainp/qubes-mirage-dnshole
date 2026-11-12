@@ -45,10 +45,12 @@ qvm-create \
   --property provides_network=True \
   --property vcpus=1 \
   --property virt_mode=pvh \
+  --property audiovm='' \
   --label=green \
   --class StandaloneVM \
   sys-mirage-dnshole
 qvm-features sys-mirage-dnshole no-default-kernelopts 1
+qvm-features mirage-firewall skip-update 1
 ```
 
 In order to use it, you will also need to download a blocking list (or create it by yourself), tar store it, as a tarball in the root volume of your unikernel VM:
@@ -61,6 +63,19 @@ You also may want to name differently you blocking list, or store multiple diffe
 qvm-prefs --set sys-mirage-dnshole -- kernelopts '--blocklist-name=theotherlistname.txt'
 ```
 
+It is possible to use the unikernel as an ALLOW filter with the additional argument:
+```bash
+qvm-prefs --set sys-mirage-dnshole -- kernelopts '--pass=true'
+```
+In this mode, the domain list holds the allowed names: queries for listed names are forwarded upstream, and every other name is answered with localhost.
+
+It is possible to configure if the presence of a domain also implies its subdomains are in the list with the additional argument:
+```bash
+qvm-prefs --set sys-mirage-dnshole -- kernelopts '--subdomains=true'
+```
+
+You need to specify all your arguments as the same `kernelopts` value.
+
 Various notes
 -------------
 
@@ -68,6 +83,7 @@ Be aware that any DNS request that use other addresses than the one of the unike
 
 The current unikernel has some limitations such as:
   - the unikernel is very new and is not tested as what qubes-mirage-firewall is
+  - for a name present in the list, only A and AAAA queries get a localhost address. Other query types (MX, TXT...) get an empty but valid answer
   - the netvm property cannot be change on the fly, I'm trying to keep the code simple but I'll work on that at some point
   - the unikernel does not support commands, nor firewalling rules, you'll need to chain multiple unikernels
 

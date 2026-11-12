@@ -30,6 +30,23 @@ let ndomains =
   in
   Mirage_runtime.register_arg Arg.(value & opt int 32 doc)
 
+let pass =
+  let doc =
+    Arg.info
+      ~doc:
+        "Defines if the unikernel let pass or not the matching DNS request. \
+         E.g. pass=false would be the default to run as a DNS-hole."
+      [ "pass" ]
+  in
+  Mirage_runtime.register_arg Arg.(value & opt bool false doc)
+
+let subdomains =
+  let doc =
+    Arg.info ~doc:"Also match every subdomain of the listed names."
+      [ "subdomains" ]
+  in
+  Mirage_runtime.register_arg Arg.(value & opt bool false doc)
+
 module Main (KV : Mirage_kv.RO) = struct
   type uplink = {
     mutable fragments : Fragments.Cache.t;
@@ -98,11 +115,37 @@ module Main (KV : Mirage_kv.RO) = struct
     | Error (`Msg msg) ->
         Logs.err (fun m -> m "Invalid domain name: %s" msg);
         t
-    | Ok name ->
+    | Ok name -> (
         let t = Dns_trie.insert name Dns.Rr_map.Aaaa ipv6_pair t in
         let t = Dns_trie.insert name Dns.Rr_map.A ipv4_pair t in
         let t = Dns_trie.insert name Dns.Rr_map.Soa soa t in
-        t
+        (* "*" under the zone matches any subdomain, at any depth *)
+        match (subdomains (), Domain_name.prepend_label name "*") with
+        | true, Ok star ->
+            let t = Dns_trie.insert star Dns.Rr_map.Aaaa ipv6_pair t in
+            Dns_trie.insert star Dns.Rr_map.A ipv4_pair t
+        | _ -> t)
+
+  (* A listed name under another listed name creates a node without "*" that
+     hides the parent wildcard for its subtree: drop it, the parent covers it *)
+  let drop_covered domains =
+    let names =
+      List.filter_map
+        (fun s -> Result.to_option (Domain_name.of_string s))
+        domains
+    in
+    let set = Domain_name.Set.of_list names in
+    let rec covered n =
+      match Domain_name.drop_label n with
+      | Ok p -> Domain_name.Set.mem p set || covered p
+      | Error _ -> false
+    in
+    List.filter
+      (fun s ->
+        match Domain_name.of_string s with
+        | Ok n -> not (covered n)
+        | Error _ -> true)
+      domains
 
   (* Helpers *)
   let compare a b = Ipaddr.V4.compare a b = 0
@@ -113,6 +156,23 @@ module Main (KV : Mirage_kv.RO) = struct
     | cmd ->
         Log.warn (fun f -> f "Unknown command %S" cmd);
         return 1
+
+  (* Answer for a name absent from the trie: localhost for A/AAAA, empty otherwise *)
+  let localhost_answer (name, typ) =
+    let answer =
+      match typ with
+      | `K (Dns.Rr_map.K Dns.Rr_map.A) ->
+          Dns.Name_rr_map.singleton name Dns.Rr_map.A ipv4_pair
+      | `K (Dns.Rr_map.K Dns.Rr_map.Aaaa) ->
+          Dns.Name_rr_map.singleton name Dns.Rr_map.Aaaa ipv6_pair
+      | `Any ->
+          Dns.Name_rr_map.add name Dns.Rr_map.Aaaa ipv6_pair
+            (Dns.Name_rr_map.singleton name Dns.Rr_map.A ipv4_pair)
+      | _ -> Dns.Name_rr_map.empty
+    in
+    ( Dns.Packet.Flags.singleton `Authoritative,
+      (answer, Dns.Name_rr_map.empty),
+      None )
 
   (* Ethernet.write refuses any size above the MTU, and an aggregated frame is
      larger than its link on purpose. For those, put the fourteen header bytes in
@@ -299,15 +359,25 @@ module Main (KV : Mirage_kv.RO) = struct
                   (* Unable to decode the packet: drop *)
                   Lwt.return_unit
               | Ok dns_packet -> (
-                  match
-                    Dns_server.handle_question primary_t
-                      dns_packet.Dns.Packet.question
-                  with
-                  | Error _ ->
-                      (* The domain is not found in the blocking list, forward upstream for resolution *)
-                      nat_and_forward t packet
-                  | Ok (flags, data, additional) ->
-                      (* construct a Nat_packet for that client with a DNS answer saying that the name is associated with localhost *)
+                  let question = dns_packet.Dns.Packet.question in
+                  let response =
+                    match
+                      (pass (), Dns_server.handle_question primary_t question)
+                    with
+                    | true, Ok _ (* allow list and name listed *)
+                    | false, Error _ ->
+                        (* or deny list and name not listed *)
+                        None
+                    | true, Error _ ->
+                        (* allow list and name not listed: no answer in the trie, build one *)
+                        Some (localhost_answer question)
+                    | false, Ok answer ->
+                        (* deny list and name listed: the trie holds the localhost answer *)
+                        Some answer
+                  in
+                  match response with
+                  | None -> nat_and_forward t packet
+                  | Some (flags, data, additional) ->
                       let domain =
                         Domain_name.to_string
                           (fst dns_packet.Dns.Packet.question)
@@ -574,6 +644,15 @@ module Main (KV : Mirage_kv.RO) = struct
                 blocklist_name);
           Fmt.failwith "No Blocklist found"
       | Ok list -> parse_domain_file list
+    in
+    let domains =
+      if subdomains () then (
+        let kept = drop_covered domains in
+        Log.info (fun m ->
+            m "subdomains: %d names covered by a listed parent dropped"
+              (List.length domains - List.length kept));
+        kept)
+      else domains
     in
     let trie = List.fold_right add_dns_entries domains Dns_trie.empty in
     let primary_t = Dns_server.create trie Mirage_crypto_rng.generate in
