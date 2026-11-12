@@ -115,21 +115,22 @@ module Main (KV : Mirage_kv.RO) = struct
     | Error (`Msg msg) ->
         Logs.err (fun m -> m "Invalid domain name: %s" msg);
         t
-    | Ok name ->
+    | Ok name -> (
         let t = Dns_trie.insert name Dns.Rr_map.Aaaa ipv6_pair t in
         let t = Dns_trie.insert name Dns.Rr_map.A ipv4_pair t in
         let t = Dns_trie.insert name Dns.Rr_map.Soa soa t in
         (* "*" under the zone matches any subdomain, at any depth *)
-        match subdomains (), Domain_name.prepend_label name "*" with
+        match (subdomains (), Domain_name.prepend_label name "*") with
         | true, Ok star ->
             let t = Dns_trie.insert star Dns.Rr_map.Aaaa ipv6_pair t in
             Dns_trie.insert star Dns.Rr_map.A ipv4_pair t
-        | _ -> t
+        | _ -> t)
 
   (* A listed name under another listed name creates a node without "*" that
      hides the parent wildcard for its subtree: drop it, the parent covers it *)
   let drop_covered domains =
-    let names = List.filter_map
+    let names =
+      List.filter_map
         (fun s -> Result.to_option (Domain_name.of_string s))
         domains
     in
@@ -644,7 +645,8 @@ module Main (KV : Mirage_kv.RO) = struct
           Fmt.failwith "No Blocklist found"
       | Ok list -> parse_domain_file list
     in
-    let domains = if subdomains () then (
+    let domains =
+      if subdomains () then (
         let kept = drop_covered domains in
         Log.info (fun m ->
             m "subdomains: %d names covered by a listed parent dropped"
