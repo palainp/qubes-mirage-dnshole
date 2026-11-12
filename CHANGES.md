@@ -1,3 +1,7 @@
+### 0.2.2 (2026-11-12)
+
+- Add notifications, PR #8 @palainp, so the unikernel needs GUI which may delay the boot time, so we keep a promise for notifications, PR #9, @palainp
+
 ### 0.2.1 (2026-11-01)
 
 - Update ecosystem, PR #7 @palainp
