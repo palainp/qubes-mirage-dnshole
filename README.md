@@ -61,6 +61,12 @@ You also may want to name differently you blocking list, or store multiple diffe
 qvm-prefs --set sys-mirage-dnshole -- kernelopts '--blocklist-name=theotherlistname.txt'
 ```
 
+It is possible to use the unikernel as an ALLOW filter with the additional argument:
+```bash
+qvm-prefs --set sys-mirage-dnshole -- kernelopts '--pass=true'
+```
+In this mode, the domain list holds the allowed names: queries for listed names are forwarded upstream, and every other name is answered with localhost.
+
 Various notes
 -------------
 
@@ -68,6 +74,8 @@ Be aware that any DNS request that use other addresses than the one of the unike
 
 The current unikernel has some limitations such as:
   - the unikernel is very new and is not tested as what qubes-mirage-firewall is
+  - for a name present in the list, only A and AAAA queries get a localhost address. Other query types (MX, TXT...) get an empty but valid answer
+  - only exact names match: if `example.com` is allowed, `www.example.com` is still denied. Every subdomain in use must be listed explicitly
   - the netvm property cannot be change on the fly, I'm trying to keep the code simple but I'll work on that at some point
   - the unikernel does not support commands, nor firewalling rules, you'll need to chain multiple unikernels
 
