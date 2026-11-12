@@ -35,7 +35,7 @@ let pass =
     Arg.info
       ~doc:
         "Defines if the unikernel let pass or not the matching DNS request. \
-        E.g. pass=false would be the default to run as a DNS-hole."
+         E.g. pass=false would be the default to run as a DNS-hole."
       [ "pass" ]
   in
   Mirage_runtime.register_arg Arg.(value & opt bool false doc)
@@ -137,8 +137,9 @@ module Main (KV : Mirage_kv.RO) = struct
             (Dns.Name_rr_map.singleton name Dns.Rr_map.A ipv4_pair)
       | _ -> Dns.Name_rr_map.empty
     in
-    ( Dns.Packet.Flags.singleton `Authoritative, (answer, Dns.Name_rr_map.empty), None )
-
+    ( Dns.Packet.Flags.singleton `Authoritative,
+      (answer, Dns.Name_rr_map.empty),
+      None )
 
   (* Ethernet.write refuses any size above the MTU, and an aggregated frame is
      larger than its link on purpose. For those, put the fourteen header bytes in
@@ -326,18 +327,20 @@ module Main (KV : Mirage_kv.RO) = struct
                   Lwt.return_unit
               | Ok dns_packet -> (
                   let question = dns_packet.Dns.Packet.question in
-                  let response = match pass (), Dns_server.handle_question primary_t question with
-                    | true, Ok _
-                      (* allow list and name listed *)
+                  let response =
+                    match
+                      (pass (), Dns_server.handle_question primary_t question)
+                    with
+                    | true, Ok _ (* allow list and name listed *)
                     | false, Error _ ->
-                      (* or deny list and name not listed *)
-                      None
+                        (* or deny list and name not listed *)
+                        None
                     | true, Error _ ->
-                      (* allow list and name not listed: no answer in the trie, build one *)
-                      Some (localhost_answer question)
+                        (* allow list and name not listed: no answer in the trie, build one *)
+                        Some (localhost_answer question)
                     | false, Ok answer ->
-                      (* deny list and name listed: the trie holds the localhost answer *)
-                      Some answer
+                        (* deny list and name listed: the trie holds the localhost answer *)
+                        Some answer
                   in
                   match response with
                   | None -> nat_and_forward t packet
