@@ -45,7 +45,7 @@ module Main (KV : Mirage_kv.RO) = struct
         (* dns0 and dns1 from qubesDB, and the resolver address from command line *)
     dns : Ipaddr.V4.t * Ipaddr.V4.t;
     clients : Clients.t;
-    notifier : Notification.t option;
+    notifier : Notification.t option Lwt.t;
     notified : string Queue.t;
         (* last notified domains, oldest first. Avoid spam :) *)
   }
@@ -308,21 +308,21 @@ module Main (KV : Mirage_kv.RO) = struct
                       nat_and_forward t packet
                   | Ok (flags, data, additional) ->
                       (* construct a Nat_packet for that client with a DNS answer saying that the name is associated with localhost *)
-                      (match t.notifier with
-                      | Some notifier ->
-                          let domain =
-                            Domain_name.to_string
-                              (fst dns_packet.Dns.Packet.question)
-                          in
-                          if
-                            not
-                              (Seq.exists (String.equal domain)
-                                 (Queue.to_seq t.notified))
-                          then (
-                            Queue.push domain t.notified;
-                            if Queue.length t.notified > ndomains () then
-                              ignore (Queue.pop t.notified);
-                            Lwt.async (fun () ->
+                      let domain =
+                        Domain_name.to_string
+                          (fst dns_packet.Dns.Packet.question)
+                      in
+                      if
+                        not
+                          (Seq.exists (String.equal domain)
+                             (Queue.to_seq t.notified))
+                      then (
+                        Queue.push domain t.notified;
+                        if Queue.length t.notified > ndomains () then
+                          ignore (Queue.pop t.notified);
+                        Lwt.async (fun () ->
+                            t.notifier >>= function
+                            | Some notifier -> (
                                 Notification.notify notifier
                                   ~body:
                                     (Fmt.str "%s (requested by %a)" domain
@@ -332,8 +332,8 @@ module Main (KV : Mirage_kv.RO) = struct
                                 | Ok () -> ()
                                 | Error e ->
                                     Log.warn (fun f ->
-                                        f "qubes.Notifications: %s" e)))
-                      | None -> ());
+                                        f "qubes.Notifications: %s" e))
+                            | None -> Lwt.return_unit));
                       let ip_hdr : Ipv4_packet.t =
                         {
                           hdr with
@@ -538,18 +538,8 @@ module Main (KV : Mirage_kv.RO) = struct
     let agent_listener = RExec.listen qrexec ~handler:command_handler () in
     GUI.connect ~domid:0 () |> watch_gui;
 
-    (* The timeout is here to ensure we do not stay blocked waiting for the
-       notification service *)
-    let* notifier =
-      Lwt.pick
-        [
-          Notification.connect qrexec;
-          ( Mirage_sleep.ns (Duration.of_sec 5) >|= fun () ->
-            Error "notification connection timed out" );
-        ]
-    in
     let notifier =
-      match notifier with
+      Notification.connect qrexec >|= function
       | Ok n -> Some n
       | Error e ->
           Log.warn (fun f -> f "qubes.Notifications: %s" e);
@@ -562,7 +552,7 @@ module Main (KV : Mirage_kv.RO) = struct
       Int64.to_float time_in_ns /. 1e9
     in
     Log.info (fun f ->
-        f "QubesDB and qrexec agents connected in %.3f s" startup_time);
+        f "QubesDB, qrexec and GUI agents connected in %.3f s" startup_time);
 
     (* Set up networking *)
     let nat =
