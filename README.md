@@ -67,6 +67,11 @@ qvm-prefs --set sys-mirage-dnshole -- kernelopts '--pass=true'
 ```
 In this mode, the domain list holds the allowed names: queries for listed names are forwarded upstream, and every other name is answered with localhost.
 
+It is possible to configure if the presence of a domain also implies its subdomains are in the list with the additional argument:
+```bash
+qvm-prefs --set sys-mirage-dnshole -- kernelopts '--subdomains=true'
+```
+
 Various notes
 -------------
 
@@ -75,7 +80,6 @@ Be aware that any DNS request that use other addresses than the one of the unike
 The current unikernel has some limitations such as:
   - the unikernel is very new and is not tested as what qubes-mirage-firewall is
   - for a name present in the list, only A and AAAA queries get a localhost address. Other query types (MX, TXT...) get an empty but valid answer
-  - only exact names match: if `example.com` is allowed, `www.example.com` is still denied. Every subdomain in use must be listed explicitly
   - the netvm property cannot be change on the fly, I'm trying to keep the code simple but I'll work on that at some point
   - the unikernel does not support commands, nor firewalling rules, you'll need to chain multiple unikernels
 
