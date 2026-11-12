@@ -45,10 +45,12 @@ qvm-create \
   --property provides_network=True \
   --property vcpus=1 \
   --property virt_mode=pvh \
+  --property audiovm='' \
   --label=green \
   --class StandaloneVM \
   sys-mirage-dnshole
 qvm-features sys-mirage-dnshole no-default-kernelopts 1
+qvm-features mirage-firewall skip-update 1
 ```
 
 In order to use it, you will also need to download a blocking list (or create it by yourself), tar store it, as a tarball in the root volume of your unikernel VM:
@@ -71,6 +73,8 @@ It is possible to configure if the presence of a domain also implies its subdoma
 ```bash
 qvm-prefs --set sys-mirage-dnshole -- kernelopts '--subdomains=true'
 ```
+
+You need to specify all your arguments as the same `kernelopts` value.
 
 Various notes
 -------------
